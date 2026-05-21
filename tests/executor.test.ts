@@ -302,6 +302,66 @@ test("executor runs global scripts once without project selection", async () => 
   assert.match(results[0]?.output ?? "", /global-run/);
 });
 
+test("executor prints a visible project banner in passthrough mode", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-executor-banner-"));
+  writeEchoProjectModule(root);
+  const config: AppConfig = {
+    configPath: path.join(root, "devtools.toml"),
+    discovery: {
+      roots: [root],
+      includePatterns: [],
+      excludePatterns: [],
+      projectTypes: ["python"],
+      cacheFile: path.join(root, ".cache.json"),
+    },
+    scripts: {
+      directory: path.join(root, "scripts"),
+    },
+    tui: {
+      favoritesFile: path.join(root, ".favorites.json"),
+      scriptStateFile: path.join(root, ".script-state.json"),
+      scheduledJobsFile: path.join(root, ".scheduled-jobs.json"),
+      projectRows: 10,
+      summaryRows: 6,
+      projectSort: "alphabetical",
+    },
+  };
+  const script: ScriptDefinition = {
+    scriptId: "echo_project",
+    name: "Echo Project",
+    description: "",
+    projectTypes: ["python"],
+    entry: "echoProject",
+    directory: root,
+    manifestPath: path.join(root, "manifest.toml"),
+    defaultArgs: {},
+  };
+  const project: Project = {
+    name: "sample-project",
+    path: root,
+    projectType: "python",
+    marker: "pyproject.toml",
+    projectTypes: ["python"],
+    identity: `sample:${root}`,
+  };
+  let stdout = "";
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stdout.write;
+
+  try {
+    const results = await runScriptForProjects(config, script, [project], {}, undefined, undefined, "passthrough");
+    assert.equal(results[0]?.success, true);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+
+  assert.match(stdout, /sample-project/);
+  assert.match(stdout, /-+/);
+});
+
 function writeEchoProjectModule(directory: string): void {
   fs.writeFileSync(
     path.join(directory, "script.ts"),

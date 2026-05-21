@@ -41,6 +41,7 @@ export async function runScriptForProjects(
       eventCallback?.(`[skip] ${project.path} :: ${result.message}`);
       continue;
     }
+    writeProjectBanner(project, outputMode);
     eventCallback?.(`[start] ${script.scriptId} -> ${project.path}`);
     const result = await runScriptForProject(config, script, project, cliArgs, eventCallback, signal, outputMode);
     results.push(result);
@@ -49,6 +50,22 @@ export async function runScriptForProjects(
     eventCallback?.(`[${prefix}] ${project.path} :: ${detail}`);
   }
   return results;
+}
+
+function writeProjectBanner(project: Project, outputMode: RunOutputMode): void {
+  if (outputMode !== "passthrough") {
+    return;
+  }
+  const separator = "-".repeat(Math.max(24, project.name.length + 16));
+  process.stdout.write(
+    [
+      "",
+      `\x1b[93m${separator}\x1b[0m`,
+      `\x1b[30;103m----- ${project.name} -----\x1b[0m`,
+      `\x1b[93m${separator}\x1b[0m`,
+      "",
+    ].join("\n"),
+  );
 }
 
 export async function runScriptForProject(
