@@ -1,8 +1,0 @@
-id = "list_direct_children"
-name = "List Direct Children"
-description = "List the immediate children below the project directory."
-project_types = ["maven", "node", "python"]
-entry = "listDirectChildren"
-
-[default_args]
-limit = 20

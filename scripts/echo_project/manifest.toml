@@ -1,8 +1,0 @@
-id = "echo_project"
-name = "Echo Project"
-description = "Print basic project information."
-project_types = ["maven", "node", "python"]
-entry = "echoProject"
-
-[default_args]
-include_marker = true
