@@ -1,10 +1,12 @@
-login_url = "https://openshift.example.internal/login"
-command_url = "https://openshift.example.internal/command-line-tools"
-username = ""
-password = ""
-username_selector = "id:inputUsername"
-password_selector = "id:inputPassword"
-submit_selector = "css:button[type='submit']"
-post_login_wait_selector = ""
-command_reveal_selector = ""
-command_selector = "css:code"
+# Path to your maintained OpenShift credentials file.
+# Example:
+# credentials_file = "~/.oc-credentials.toml"
+#
+# Expected format of the external file:
+# login_url = "https://oauth-openshift.apps.example.internal/oauth/token/request"
+# username = "your.username"
+# password = ""
+#
+# If username or password are empty or missing, the script asks interactively.
+
+credentials_file = "~/.oc-credentials.toml"

@@ -1,5 +1,5 @@
 id = "maven_dependency_update"
-name = "☕ Maven dependency update"
+name = "☕  Maven dependency update"
 description = "Run mvn versions:use-latest-releases for all pom.xml locations inside the selected project."
 project_types = ["maven"]
 entry = "mavenDependencyUpdate"

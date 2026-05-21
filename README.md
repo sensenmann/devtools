@@ -2,6 +2,12 @@
 
 `devtools` is a TypeScript-based utility for discovering projects, listing registered maintenance scripts, and executing those scripts through a CLI or interactive TUI.
 
+## Installation
+```bash
+npm i
+npx playwright install chromium 
+```
+
 ## Run
 
 ```bash

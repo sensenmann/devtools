@@ -35,7 +35,8 @@ interface ScheduledJobDraft {
 
 interface TuiState {
   projects: Project[];
-  filter: string;
+  scriptFilter: string;
+  projectFilter: string;
   focusPane: FocusPane;
   projectCursor: number;
   scriptCursor: number;
@@ -67,7 +68,8 @@ interface TuiState {
 export async function runTui(service: DevtoolsService): Promise<void> {
   const state: TuiState = {
     projects: service.refreshProjects(),
-    filter: "",
+    scriptFilter: "",
+    projectFilter: "",
     focusPane: "scripts",
     projectCursor: 0,
     scriptCursor: 0,
@@ -205,6 +207,25 @@ function handleMainKeypress(
     handleProjectInput(service, state, input, key, service.config.tui.projectSort, scripts);
     return false;
   }
+  const pageSize = Math.max(1, service.config.tui.projectRows);
+  if (key.name === "pageup") {
+    state.scriptCursor = Math.max(0, state.scriptCursor - pageSize);
+    return false;
+  }
+  if (key.name === "pagedown") {
+    state.scriptCursor = Math.min(Math.max(0, scripts.length - 1), state.scriptCursor + pageSize);
+    return false;
+  }
+  if (key.name === "backspace") {
+    state.scriptFilter = state.scriptFilter.slice(0, -1);
+    state.scriptCursor = 0;
+    return false;
+  }
+  if (typeof input === "string" && input.length === 1 && !key.ctrl && !key.meta && !isControlCharacter(input)) {
+    state.scriptFilter += input;
+    state.scriptCursor = 0;
+    return false;
+  }
   if (key.name === "up") {
     state.scriptCursor = Math.max(0, state.scriptCursor - 1);
     return false;
@@ -241,12 +262,21 @@ function handleProjectInput(
 ): void {
   const selectedScript = scripts[state.scriptCursor];
   const filteredProjects = getFilteredProjectsForScript(service, state, projectSort, selectedScript);
+  const pageSize = Math.max(1, service.config.tui.projectRows);
   if (key.name === "up") {
     state.projectCursor = Math.max(0, state.projectCursor - 1);
     return;
   }
   if (key.name === "down") {
     state.projectCursor = Math.min(filteredProjects.length - 1, state.projectCursor + 1);
+    return;
+  }
+  if (key.name === "pageup") {
+    state.projectCursor = Math.max(0, state.projectCursor - pageSize);
+    return;
+  }
+  if (key.name === "pagedown") {
+    state.projectCursor = Math.min(Math.max(0, filteredProjects.length - 1), state.projectCursor + pageSize);
     return;
   }
   if (key.name === "return" || input === " ") {
@@ -274,12 +304,12 @@ function handleProjectInput(
     return;
   }
   if (key.name === "backspace") {
-    state.filter = state.filter.slice(0, -1);
+    state.projectFilter = state.projectFilter.slice(0, -1);
     state.projectCursor = 0;
     return;
   }
   if (typeof input === "string" && input.length === 1 && !key.ctrl && !key.meta && !isControlCharacter(input)) {
-    state.filter += input;
+    state.projectFilter += input;
     state.projectCursor = 0;
   }
 }
@@ -579,13 +609,17 @@ function renderMainFrame(service: DevtoolsService, state: TuiState): void {
   const visibleScripts = scripts.slice(state.scriptScrollOffset, state.scriptScrollOffset + rowCount);
   const activeProjectRow = state.projectCursor - state.projectScrollOffset;
   const activeScriptRow = state.scriptCursor - state.scriptScrollOffset;
+  const showGlobalProjectsHint = !!selectedScript && !isScriptGroup(selectedScript) && selectedScript.scope === "global";
 
   const lines: string[] = [];
   lines.push(drawHorizontal("top", width));
-  lines.push(drawLine(` ${color("devtools", "cyan")}  filter: ${highlightInput(state.filter)}  focus: ${state.focusPane} `, width));
+  lines.push(drawLine(` ${color("devtools", "cyan")}  focus: ${state.focusPane} `, width));
   lines.push(drawLine(` ${color("keys:", "yellow")} ${renderMainKeyHelp()} `, width));
   lines.push(drawHorizontal("divider", width));
-  lines.push(drawLine(`${pad(color("Scripts", "cyan"), leftWidth)}${" ".repeat(gutter)}${pad(color("Projects", "cyan"), rightWidth)}`, width));
+  lines.push(drawLine(
+    `${pad(formatPaneTitle("Scripts", state.scriptFilter), leftWidth)}${" ".repeat(gutter)}${pad(formatPaneTitle("Projects", state.projectFilter), rightWidth)}`,
+    width,
+  ));
   lines.push(drawHorizontal("divider", width));
   for (let index = 0; index < rowCount; index += 1) {
     const script = visibleScripts[index];
@@ -593,7 +627,9 @@ function renderMainFrame(service: DevtoolsService, state: TuiState): void {
     const scriptText = script ? formatScriptEntry(script, state.selectedVariants, state.favoriteScriptIds) : "";
     const projectText = project
       ? `${state.selectedProjectIds.includes(project.identity) ? "[x]" : "[ ]"} ${state.favoriteProjectPaths.includes(project.path) ? "⭐️ " : ""}${project.name} [${project.projectTypes.join(",")}]`
-      : "";
+      : showGlobalProjectsHint && index === 0
+        ? color("<Globales Script>", "gray")
+        : "";
     lines.push(drawLine(
       `${highlight(scriptText, pad(scriptText, leftWidth), state.focusPane === "scripts" && index === activeScriptRow)}${" ".repeat(gutter)}${highlight(projectText, pad(projectText, rightWidth), state.focusPane === "projects" && index === activeProjectRow)}`,
       width,
@@ -760,10 +796,10 @@ function renderSimpleMenu(
 }
 
 function getFilteredProjects(
-  state: Pick<TuiState, "projects" | "filter" | "selectedProjectIds" | "favoriteProjectPaths">,
+  state: Pick<TuiState, "projects" | "projectFilter" | "selectedProjectIds" | "favoriteProjectPaths">,
   projectSort: "alphabetical" | "modified",
 ): Project[] {
-  const lowered = state.filter.toLowerCase();
+  const lowered = state.projectFilter.toLowerCase();
   return sortProjects(state.projects, projectSort, state.favoriteProjectPaths).filter((project) =>
     state.selectedProjectIds.includes(project.identity) ||
     lowered.length === 0 ||
@@ -774,7 +810,7 @@ function getFilteredProjects(
 
 function getFilteredProjectsForScript(
   service: DevtoolsService,
-  state: Pick<TuiState, "projects" | "filter" | "selectedProjectIds" | "favoriteProjectPaths">,
+  state: Pick<TuiState, "projects" | "projectFilter" | "selectedProjectIds" | "favoriteProjectPaths">,
   projectSort: "alphabetical" | "modified",
   script: ScriptEntry | undefined,
 ): Project[] {
@@ -890,9 +926,55 @@ function getSelectedProjects(state: Pick<TuiState, "projects" | "selectedProject
 
 function getScripts(
   service: DevtoolsService,
-  state: Pick<TuiState, "favoriteScriptIds">,
+  state: Pick<TuiState, "favoriteScriptIds" | "scriptFilter">,
 ): ScriptEntry[] {
-  return sortScriptEntriesForFavorites(service.listScripts(), state.favoriteScriptIds);
+  return filterScriptEntries(
+    sortScriptEntriesForFavorites(service.listScripts(), state.favoriteScriptIds),
+    state.scriptFilter,
+  );
+}
+
+function filterScriptEntries(scripts: ScriptEntry[], filter: string): ScriptEntry[] {
+  const lowered = filter.trim().toLowerCase();
+  if (lowered.length === 0) {
+    return scripts;
+  }
+
+  const filtered: ScriptEntry[] = [];
+  for (let index = 0; index < scripts.length;) {
+    const current = scripts[index]!;
+    if (!isScriptGroup(current)) {
+      if (matchesScriptFilter(current, lowered)) {
+        filtered.push(current);
+      }
+      index += 1;
+      continue;
+    }
+
+    const children: ScriptEntry[] = [];
+    index += 1;
+    while (index < scripts.length) {
+      const next = scripts[index]!;
+      if (isScriptGroup(next) || next.group !== current.name) {
+        break;
+      }
+      children.push(next);
+      index += 1;
+    }
+
+    const groupMatches = matchesScriptFilter(current, lowered);
+    const matchingChildren = children.filter((child) => matchesScriptFilter(child, lowered));
+    if (!groupMatches && matchingChildren.length === 0) {
+      continue;
+    }
+    filtered.push(current, ...(groupMatches ? children : matchingChildren));
+  }
+
+  return filtered;
+}
+
+function matchesScriptFilter(script: ScriptEntry, loweredFilter: string): boolean {
+  return script.name.toLowerCase().includes(loweredFilter) || script.scriptId.toLowerCase().includes(loweredFilter);
 }
 
 function getDraftScripts(service: DevtoolsService, favoriteScriptIds: string[], draft: ScheduledJobDraft): ScriptEntry[] {
@@ -956,8 +1038,8 @@ function truncate(value: string, width: number): string {
   return `${visible.slice(0, Math.max(0, width - 1))}…`;
 }
 
-function color(value: string, tone: "cyan" | "magenta" | "yellow"): string {
-  const code = tone === "cyan" ? "36" : tone === "magenta" ? "35" : "33";
+function color(value: string, tone: "cyan" | "magenta" | "yellow" | "gray"): string {
+  const code = tone === "cyan" ? "36" : tone === "magenta" ? "35" : tone === "yellow" ? "33" : "90";
   return `\x1b[${code}m${value}\x1b[0m`;
 }
 
@@ -973,6 +1055,13 @@ function highlightInput(value: string): string {
     return " ";
   }
   return `\x1b[30;103m ${value} \x1b[0m`;
+}
+
+function formatPaneTitle(label: string, filter: string): string {
+  if (filter.length === 0) {
+    return color(label, "cyan");
+  }
+  return `${color(label, "cyan")}  filter: ${highlightInput(filter)}`;
 }
 
 function highlightVariantLabel(value: string): string {

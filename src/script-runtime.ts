@@ -170,41 +170,67 @@ export function loadScriptConfig<T extends Record<string, unknown>>(scriptDirect
   return parseSimpleToml(fs.readFileSync(configPath, "utf8")) as T;
 }
 
+export async function promptLine(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("Interactive prompt requires an interactive TTY.");
+  }
+
+  return await new Promise<string>((resolve, reject) => {
+    const restoreRawMode = process.stdin.isRaw;
+    const output = createTtyOutput();
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: output.stream,
+      terminal: true,
+    });
+
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(false);
+    }
+
+    rl.question(prompt, (answer) => {
+      rl.close();
+      output.close();
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(restoreRawMode);
+      }
+      resolve(answer.trim());
+    });
+
+    rl.on("error", (error) => {
+      rl.close();
+      output.close();
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(restoreRawMode);
+      }
+      reject(error);
+    });
+  });
+}
+
 export async function promptHidden(prompt: string): Promise<string> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error("Password prompt requires an interactive TTY.");
   }
 
   return await new Promise<string>((resolve, reject) => {
-    let ttyFd: number | undefined;
     const restoreRawMode = process.stdin.isRaw;
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      terminal: true,
-    });
+    const output = createTtyOutput();
 
     const cleanup = () => {
       process.stdin.off("data", onData);
-      rl.close();
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(restoreRawMode);
       }
-      if (ttyFd !== undefined) {
-        fs.closeSync(ttyFd);
-      }
+      output.close();
     };
 
     let value = "";
-    try {
-      ttyFd = fs.openSync("/dev/tty", "w");
-      fs.writeSync(ttyFd, prompt);
-    } catch {
-      process.stdout.write(prompt);
-    }
+    output.write(prompt);
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
     }
+    process.stdin.resume();
 
     const onData = (chunk: Buffer) => {
       const text = chunk.toString("utf8");
@@ -214,11 +240,7 @@ export async function promptHidden(prompt: string): Promise<string> {
         return;
       }
       if (text === "\r" || text === "\n") {
-        if (ttyFd !== undefined) {
-          fs.writeSync(ttyFd, "\n");
-        } else {
-          process.stdout.write("\n");
-        }
+        output.write("\n");
         cleanup();
         resolve(value);
         return;
@@ -232,6 +254,29 @@ export async function promptHidden(prompt: string): Promise<string> {
 
     process.stdin.on("data", onData);
   });
+}
+
+function createTtyOutput(): { stream: NodeJS.WritableStream; write: (value: string) => void; close: () => void } {
+  try {
+    const stream = fs.createWriteStream("/dev/tty");
+    return {
+      stream,
+      write: (value: string) => {
+        stream.write(value);
+      },
+      close: () => {
+        stream.end();
+      },
+    };
+  } catch {
+    return {
+      stream: process.stdout,
+      write: (value: string) => {
+        process.stdout.write(value);
+      },
+      close: () => {},
+    };
+  }
 }
 
 function walkProjectTree(
