@@ -18,13 +18,13 @@ directory = "scripts"
 # width = 120
 
 # Visible rows in the project/script list.
-project_rows = 10
+project_rows = 20
 
 # Visible summary lines at the bottom.
 summary_rows = 6
 
 # Project ordering: "alphabetical" or "modified" (newest first).
-project_sort = "alphabetical"
+project_sort = "modified"
 
 # Optional: where TUI favorites are stored.
 # favorites_file = ".devtools-favorites.json"

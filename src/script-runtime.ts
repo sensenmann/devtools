@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import readline from "node:readline";
 
 import type { BuiltinScriptResponse } from "./models.ts";
+import { parseSimpleToml } from "./toml.ts";
 
 const RUNTIME_SKIP_DIRS = new Set(["node_modules", ".git", "dist", "target", ".angular", ".cache", ".next"]);
 
@@ -78,6 +80,160 @@ export async function runCommandAcrossDirs(
   };
 }
 
+export async function runSingleCommand(
+  cwd: string,
+  command: string[],
+  successLabel: string,
+  log?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+): Promise<BuiltinScriptResponse> {
+  if (signal?.aborted) {
+    return {
+      success: false,
+      message: `${successLabel} cancelled.`,
+    };
+  }
+  log?.(`[cmd] global :: ${command.join(" ")}`);
+  process.stdout.write(`Running: ${command.join(" ")}\n`);
+  const result = await spawnCommand(cwd, command, signal, outputMode);
+  if (result.stdout.trim()) {
+    process.stdout.write(`${result.stdout.trimEnd()}\n`);
+  }
+  if (result.stderr.trim()) {
+    process.stderr.write(`${result.stderr.trimEnd()}\n`);
+  }
+  if (result.cancelled) {
+    return {
+      success: false,
+      message: `${successLabel} cancelled.`,
+    };
+  }
+  if (result.status !== 0) {
+    return {
+      success: false,
+      message: `${successLabel} failed with exit code ${result.status ?? "unknown"}.`,
+    };
+  }
+  return {
+    success: true,
+    message: `${successLabel} completed.`,
+  };
+}
+
+export async function runShellCommand(
+  cwd: string,
+  command: string,
+  successLabel: string,
+  log?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+): Promise<BuiltinScriptResponse> {
+  if (signal?.aborted) {
+    return {
+      success: false,
+      message: `${successLabel} cancelled.`,
+    };
+  }
+  log?.(`[cmd] global :: ${command}`);
+  process.stdout.write(`Running: ${command}\n`);
+  const result = await spawnCommand(cwd, [command], signal, outputMode, true);
+  if (result.stdout.trim()) {
+    process.stdout.write(`${result.stdout.trimEnd()}\n`);
+  }
+  if (result.stderr.trim()) {
+    process.stderr.write(`${result.stderr.trimEnd()}\n`);
+  }
+  if (result.cancelled) {
+    return {
+      success: false,
+      message: `${successLabel} cancelled.`,
+    };
+  }
+  if (result.status !== 0) {
+    return {
+      success: false,
+      message: `${successLabel} failed with exit code ${result.status ?? "unknown"}.`,
+    };
+  }
+  return {
+    success: true,
+    message: `${successLabel} completed.`,
+  };
+}
+
+export function loadScriptConfig<T extends Record<string, unknown>>(scriptDirectory: string, filename = "config.toml"): T {
+  const configPath = path.join(scriptDirectory, filename);
+  if (!fs.existsSync(configPath)) {
+    throw new Error(`Missing script config: ${configPath}`);
+  }
+  return parseSimpleToml(fs.readFileSync(configPath, "utf8")) as T;
+}
+
+export async function promptHidden(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("Password prompt requires an interactive TTY.");
+  }
+
+  return await new Promise<string>((resolve, reject) => {
+    let ttyFd: number | undefined;
+    const restoreRawMode = process.stdin.isRaw;
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: true,
+    });
+
+    const cleanup = () => {
+      process.stdin.off("data", onData);
+      rl.close();
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(restoreRawMode);
+      }
+      if (ttyFd !== undefined) {
+        fs.closeSync(ttyFd);
+      }
+    };
+
+    let value = "";
+    try {
+      ttyFd = fs.openSync("/dev/tty", "w");
+      fs.writeSync(ttyFd, prompt);
+    } catch {
+      process.stdout.write(prompt);
+    }
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+    }
+
+    const onData = (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      if (text === "\u0003") {
+        cleanup();
+        reject(new Error("Password prompt cancelled."));
+        return;
+      }
+      if (text === "\r" || text === "\n") {
+        if (ttyFd !== undefined) {
+          fs.writeSync(ttyFd, "\n");
+        } else {
+          process.stdout.write("\n");
+        }
+        cleanup();
+        resolve(value);
+        return;
+      }
+      if (text === "\u007f") {
+        value = value.slice(0, -1);
+        return;
+      }
+      value += text;
+    };
+
+    process.stdin.on("data", onData);
+  });
+}
+
 function walkProjectTree(
   currentDir: string,
   visit: (directory: string, filenames: string[]) => void,
@@ -98,12 +254,13 @@ async function spawnCommand(
   command: string[],
   signal?: AbortSignal,
   outputMode: "capture" | "passthrough" = "capture",
+  useShell = false,
 ): Promise<{ status: number | null; stdout: string; stderr: string; cancelled: boolean }> {
   return await new Promise((resolve, reject) => {
     const shouldCaptureOutput = outputMode === "capture";
-    const child = spawn(command[0], command.slice(1), {
+    const child = spawn(command[0], useShell ? [] : command.slice(1), {
       cwd,
-      shell: false,
+      shell: useShell,
       stdio: shouldCaptureOutput ? ["ignore", "pipe", "pipe"] : ["ignore", "inherit", "inherit"],
     });
 

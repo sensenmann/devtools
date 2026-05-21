@@ -51,6 +51,7 @@ export interface ScriptDefinition {
   name: string;
   description: string;
   projectTypes: ProjectType[];
+  scope?: ScriptScope;
   entry: string;
   directory: string;
   manifestPath: string;
@@ -69,6 +70,7 @@ export interface ScriptGroupDefinition {
 }
 
 export type ScriptEntry = ScriptDefinition | ScriptGroupDefinition;
+export type ScriptScope = "project" | "global";
 
 export interface ScriptVariantDefinition {
   argKey: string;
@@ -80,7 +82,7 @@ export interface ScriptVariantDefinition {
 export interface ScriptContext {
   configPath: string;
   script: ScriptDefinition;
-  project: Project;
+  project?: Project;
   args: Record<string, unknown>;
   runId: string;
   log?: (message: string) => void;
@@ -89,7 +91,7 @@ export interface ScriptContext {
 }
 
 export interface ExecutionResult {
-  project: Project;
+  project?: Project;
   script: ScriptDefinition;
   success: boolean;
   message: string;

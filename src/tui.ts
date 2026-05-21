@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import readline from "node:readline";
 
-import { loadFavoriteProjectPaths, toggleFavoriteProject } from "./favorites.ts";
+import { loadFavoriteProjectPaths, loadFavoriteScriptIds, toggleFavoriteProject, toggleFavoriteScript } from "./favorites.ts";
 import { isScriptGroup } from "./registry.ts";
+import { loadSchedulerStatus } from "./scheduler-status.ts";
+import { getLatestDueTime, getNextDueTime, POLL_INTERVAL_MS } from "./scheduler.ts";
 import { loadSelectedVariants, saveSelectedVariants } from "./script-state.ts";
 import type {
   ExecutionResult,
@@ -16,10 +18,11 @@ import type {
 import { DevtoolsService } from "./service.ts";
 
 type FocusPane = "projects" | "scripts";
-type TuiMode = "main" | "cron-menu" | "cron-script-select" | "cron-schedule-edit" | "cron-job-list";
+type TuiMode = "main" | "cron-menu" | "cron-script-select" | "cron-schedule-edit" | "cron-job-list" | "cron-job-delete-confirm";
 type CronMenuOption = "create" | "manage" | "back";
 type CronJobFlowOrigin = "cron-menu" | "cron-job-list";
 type ScheduleField = "type" | "weekday" | "hour" | "minute" | "enabled" | "save";
+type DeleteConfirmOption = "yes" | "no";
 
 interface ScheduledJobDraft {
   sourceJob?: ScheduledJob;
@@ -40,6 +43,7 @@ interface TuiState {
   scriptScrollOffset: number;
   selectedProjectIds: string[];
   favoriteProjectPaths: string[];
+  favoriteScriptIds: string[];
   selectedVariants: Record<string, string>;
   logs: string[];
   running: boolean;
@@ -56,19 +60,22 @@ interface TuiState {
   scheduledJobs: ScheduledJob[];
   jobDraft?: ScheduledJobDraft;
   cronJobFlowOrigin: CronJobFlowOrigin;
+  deleteConfirmCursor: number;
+  pendingDeleteJob?: ScheduledJob;
 }
 
 export async function runTui(service: DevtoolsService): Promise<void> {
   const state: TuiState = {
     projects: service.refreshProjects(),
     filter: "",
-    focusPane: "projects",
+    focusPane: "scripts",
     projectCursor: 0,
     scriptCursor: 0,
     projectScrollOffset: 0,
     scriptScrollOffset: 0,
     selectedProjectIds: [],
     favoriteProjectPaths: loadFavoriteProjectPaths(service.config),
+    favoriteScriptIds: loadFavoriteScriptIds(service.config),
     selectedVariants: loadSelectedVariants(service.config),
     logs: [],
     running: false,
@@ -82,6 +89,7 @@ export async function runTui(service: DevtoolsService): Promise<void> {
     cronScheduleFieldCursor: 0,
     scheduledJobs: service.listScheduledJobs(),
     cronJobFlowOrigin: "cron-menu",
+    deleteConfirmCursor: 1,
   };
   state.logs.push(`Refreshed top-level project cache (${state.projects.length} project(s)).`);
 
@@ -150,6 +158,9 @@ export async function runTui(service: DevtoolsService): Promise<void> {
         case "cron-job-list":
           handleCronJobListKeypress(service, state, input, key);
           break;
+        case "cron-job-delete-confirm":
+          handleCronJobDeleteConfirmKeypress(service, state, input, key);
+          break;
       }
 
       renderFrame(service, state);
@@ -172,8 +183,16 @@ function handleMainKeypress(
     state.scheduledJobs = service.listScheduledJobs();
     return false;
   }
-  if (key.name === "tab") {
-    state.focusPane = state.focusPane === "projects" ? "scripts" : "projects";
+  if (key.name === "left") {
+    if (state.focusPane === "projects") {
+      state.focusPane = "scripts";
+    }
+    return false;
+  }
+  if (key.name === "right") {
+    if (state.focusPane === "scripts") {
+      state.focusPane = "projects";
+    }
     return false;
   }
   if (isCommandKey(key, "r")) {
@@ -181,11 +200,11 @@ function handleMainKeypress(
     state.logs.push(`Refreshed top-level project cache (${state.projects.length} project(s)).`);
     return false;
   }
+  const scripts = getScripts(service, state);
   if (state.focusPane === "projects") {
-    handleProjectInput(state, input, key, service.config.tui.projectSort, service);
+    handleProjectInput(service, state, input, key, service.config.tui.projectSort, scripts);
     return false;
   }
-  const scripts = getScripts(service, state);
   if (key.name === "up") {
     state.scriptCursor = Math.max(0, state.scriptCursor - 1);
     return false;
@@ -194,11 +213,15 @@ function handleMainKeypress(
     state.scriptCursor = Math.min(scripts.length - 1, state.scriptCursor + 1);
     return false;
   }
-  if (key.name === "left") {
-    cycleScriptVariant(state.selectedVariants, scripts, state.scriptCursor, service, -1);
+  if (isCommandKey(key, "f")) {
+    const current = scripts[state.scriptCursor];
+    if (!current) {
+      return false;
+    }
+    state.favoriteScriptIds = toggleFavoriteScript(service.config, state.favoriteScriptIds, current);
     return false;
   }
-  if (key.name === "right") {
+  if (key.name === "tab") {
     cycleScriptVariant(state.selectedVariants, scripts, state.scriptCursor, service, 1);
     return false;
   }
@@ -209,13 +232,15 @@ function handleMainKeypress(
 }
 
 function handleProjectInput(
+  service: DevtoolsService,
   state: TuiState,
   input: string | undefined,
   key: readline.Key,
   projectSort: "alphabetical" | "modified",
-  service: DevtoolsService,
+  scripts: ScriptEntry[],
 ): void {
-  const filteredProjects = getFilteredProjects(state, projectSort);
+  const selectedScript = scripts[state.scriptCursor];
+  const filteredProjects = getFilteredProjectsForScript(service, state, projectSort, selectedScript);
   if (key.name === "up") {
     state.projectCursor = Math.max(0, state.projectCursor - 1);
     return;
@@ -325,7 +350,7 @@ function handleCronScriptSelectionKeypress(
     state.mode = "main";
     return;
   }
-  const scripts = getDraftScripts(service, draft);
+  const scripts = getDraftScripts(service, state.favoriteScriptIds, draft);
   if (key.name === "escape" || isJobsKey(input, key)) {
     state.mode = state.cronJobFlowOrigin;
     return;
@@ -338,11 +363,7 @@ function handleCronScriptSelectionKeypress(
     state.cronScriptCursor = Math.min(scripts.length - 1, state.cronScriptCursor + 1);
     return;
   }
-  if (key.name === "left") {
-    cycleDraftScriptVariant(draft, scripts, state.cronScriptCursor, -1);
-    return;
-  }
-  if (key.name === "right") {
+  if (key.name === "tab") {
     cycleDraftScriptVariant(draft, scripts, state.cronScriptCursor, 1);
     return;
   }
@@ -396,11 +417,7 @@ function handleCronScheduleEditKeypress(
   if (!field) {
     return;
   }
-  if (key.name === "left") {
-    mutateScheduleField(draft, field, -1);
-    return;
-  }
-  if (key.name === "right") {
+  if (key.name === "tab") {
     mutateScheduleField(draft, field, 1);
     return;
   }
@@ -456,10 +473,9 @@ function handleCronJobListKeypress(
     return;
   }
   if (key.name === "backspace" || key.name === "delete") {
-    service.deleteScheduledJob(current.jobId);
-    state.scheduledJobs = service.listScheduledJobs();
-    state.logs = [`Deleted scheduled job: ${current.name}`];
-    state.cronJobCursor = Math.min(state.cronJobCursor, Math.max(0, state.scheduledJobs.length - 1));
+    state.pendingDeleteJob = current;
+    state.deleteConfirmCursor = 1;
+    state.mode = "cron-job-delete-confirm";
     return;
   }
   if (key.name === "return") {
@@ -476,6 +492,48 @@ function handleCronJobListKeypress(
     state.cronScriptScrollOffset = 0;
     state.mode = "cron-script-select";
   }
+}
+
+function handleCronJobDeleteConfirmKeypress(
+  service: DevtoolsService,
+  state: TuiState,
+  input: string | undefined,
+  key: readline.Key,
+): void {
+  const pendingDeleteJob = state.pendingDeleteJob;
+  if (!pendingDeleteJob) {
+    state.mode = "cron-job-list";
+    return;
+  }
+  const options: DeleteConfirmOption[] = ["yes", "no"];
+  if (key.name === "escape" || isJobsKey(input, key)) {
+    state.pendingDeleteJob = undefined;
+    state.deleteConfirmCursor = 1;
+    state.mode = "cron-job-list";
+    return;
+  }
+  if (key.name === "left" || key.name === "up") {
+    state.deleteConfirmCursor = Math.max(0, state.deleteConfirmCursor - 1);
+    return;
+  }
+  if (key.name === "right" || key.name === "down") {
+    state.deleteConfirmCursor = Math.min(options.length - 1, state.deleteConfirmCursor + 1);
+    return;
+  }
+  if (key.name !== "return") {
+    return;
+  }
+
+  const selectedOption = options[state.deleteConfirmCursor];
+  if (selectedOption === "yes") {
+    service.deleteScheduledJob(pendingDeleteJob.jobId);
+    state.scheduledJobs = service.listScheduledJobs();
+    state.logs = [`Deleted scheduled job: ${pendingDeleteJob.name}`];
+    state.cronJobCursor = Math.min(state.cronJobCursor, Math.max(0, state.scheduledJobs.length - 1));
+  }
+  state.pendingDeleteJob = undefined;
+  state.deleteConfirmCursor = 1;
+  state.mode = "cron-job-list";
 }
 
 function renderFrame(service: DevtoolsService, state: TuiState): void {
@@ -495,6 +553,9 @@ function renderFrame(service: DevtoolsService, state: TuiState): void {
     case "cron-job-list":
       renderCronJobListFrame(service, state);
       return;
+    case "cron-job-delete-confirm":
+      renderCronJobDeleteConfirmFrame(service, state);
+      return;
   }
 }
 
@@ -506,8 +567,9 @@ function renderMainFrame(service: DevtoolsService, state: TuiState): void {
   const gutter = 3;
   const leftWidth = Math.floor((innerWidth - gutter) * 0.56);
   const rightWidth = innerWidth - gutter - leftWidth;
-  const filteredProjects = getFilteredProjects(state, service.config.tui.projectSort);
   const scripts = getScripts(service, state);
+  const selectedScript = scripts[state.scriptCursor];
+  const filteredProjects = getFilteredProjectsForScript(service, state, service.config.tui.projectSort, selectedScript);
   const rowCount = service.config.tui.projectRows;
   state.projectCursor = Math.min(state.projectCursor, Math.max(0, filteredProjects.length - 1));
   state.scriptCursor = Math.min(state.scriptCursor, Math.max(0, scripts.length - 1));
@@ -523,17 +585,17 @@ function renderMainFrame(service: DevtoolsService, state: TuiState): void {
   lines.push(drawLine(` ${color("devtools", "cyan")}  filter: ${highlightInput(state.filter)}  focus: ${state.focusPane} `, width));
   lines.push(drawLine(` ${color("keys:", "yellow")} ${renderMainKeyHelp()} `, width));
   lines.push(drawHorizontal("divider", width));
-  lines.push(drawLine(`${pad(color("Projects", "cyan"), leftWidth)}${" ".repeat(gutter)}${pad(color("Scripts", "cyan"), rightWidth)}`, width));
+  lines.push(drawLine(`${pad(color("Scripts", "cyan"), leftWidth)}${" ".repeat(gutter)}${pad(color("Projects", "cyan"), rightWidth)}`, width));
   lines.push(drawHorizontal("divider", width));
   for (let index = 0; index < rowCount; index += 1) {
-    const project = visibleProjects[index];
     const script = visibleScripts[index];
+    const project = visibleProjects[index];
+    const scriptText = script ? formatScriptEntry(script, state.selectedVariants, state.favoriteScriptIds) : "";
     const projectText = project
       ? `${state.selectedProjectIds.includes(project.identity) ? "[x]" : "[ ]"} ${state.favoriteProjectPaths.includes(project.path) ? "⭐️ " : ""}${project.name} [${project.projectTypes.join(",")}]`
       : "";
-    const scriptText = script ? formatScriptEntry(script, state.selectedVariants) : "";
     lines.push(drawLine(
-      `${highlight(projectText, pad(projectText, leftWidth), state.focusPane === "projects" && index === activeProjectRow)}${" ".repeat(gutter)}${highlight(scriptText, pad(scriptText, rightWidth), state.focusPane === "scripts" && index === activeScriptRow)}`,
+      `${highlight(scriptText, pad(scriptText, leftWidth), state.focusPane === "scripts" && index === activeScriptRow)}${" ".repeat(gutter)}${highlight(projectText, pad(projectText, rightWidth), state.focusPane === "projects" && index === activeProjectRow)}`,
       width,
     ));
   }
@@ -577,7 +639,7 @@ function renderCronScriptSelectionFrame(service: DevtoolsService, state: TuiStat
   const configuredWidth = service.config.tui.width;
   const width = Math.max(60, configuredWidth ? Math.min(columns, configuredWidth) : Math.max(100, columns));
   const rowCount = service.config.tui.projectRows;
-  const scripts = getDraftScripts(service, draft);
+  const scripts = getDraftScripts(service, state.favoriteScriptIds, draft);
   state.cronScriptCursor = Math.min(state.cronScriptCursor, Math.max(0, scripts.length - 1));
   state.cronScriptScrollOffset = clampScrollOffset(state.cronScriptCursor, state.cronScriptScrollOffset, scripts.length, rowCount);
   const visibleScripts = scripts.slice(state.cronScriptScrollOffset, state.cronScriptScrollOffset + rowCount);
@@ -587,14 +649,14 @@ function renderCronScriptSelectionFrame(service: DevtoolsService, state: TuiStat
   const lines: string[] = [];
   lines.push(drawHorizontal("top", width));
   lines.push(drawLine(` ${color("Scheduled Job", "magenta")}  ${projectSummary} `, width));
-  lines.push(drawLine(` ${color("keys:", "yellow")} ${formatKeybinding(["Space"], "toggle")}  ${formatKeybinding(["←/→"], "option")}  ${formatKeybinding(["Enter"], "next")}  ${formatKeybinding(["^J"], "back")} `, width));
+  lines.push(drawLine(` ${color("keys:", "yellow")} ${formatKeybinding(["Space"], "toggle")}  ${formatKeybinding(["Tab"], "option")}  ${formatKeybinding(["Enter"], "next")}  ${formatKeybinding(["^J"], "back")} `, width));
   lines.push(drawHorizontal("divider", width));
   lines.push(drawLine(` ${color("Scripts & Groups", "cyan")} `, width));
   lines.push(drawHorizontal("divider", width));
   for (let index = 0; index < rowCount; index += 1) {
     const script = visibleScripts[index];
     const text = script
-      ? `${draft.selectedScriptIds.includes(script.scriptId) ? "[x]" : "[ ]"} ${formatScriptEntry(script, draft.selectedVariants)}`
+      ? `${draft.selectedScriptIds.includes(script.scriptId) ? "[x]" : "[ ]"} ${formatScriptEntry(script, draft.selectedVariants, state.favoriteScriptIds)}`
       : "";
     lines.push(drawLine(highlight(text, pad(text, width - 2), index === activeRow), width));
   }
@@ -616,7 +678,7 @@ function renderCronScheduleEditFrame(service: DevtoolsService, state: TuiState):
   const lines: string[] = [];
   lines.push(drawHorizontal("top", width));
   lines.push(drawLine(` ${color("Schedule", "magenta")}  ${buildDraftProjectSummary(draft)}  scripts: ${draft.selectedScriptIds.length} `, width));
-  lines.push(drawLine(` ${color("keys:", "yellow")} ${formatKeybinding(["←/→"], "change")}  ${formatKeybinding(["Enter"], "save")}  ${formatKeybinding(["^J"], "back")} `, width));
+  lines.push(drawLine(` ${color("keys:", "yellow")} ${formatKeybinding(["Tab"], "change")}  ${formatKeybinding(["Enter"], "save")}  ${formatKeybinding(["^J"], "back")} `, width));
   lines.push(drawHorizontal("divider", width));
   for (const [index, field] of fields.entries()) {
     const text = formatScheduleField(field, draft);
@@ -636,19 +698,42 @@ function renderCronJobListFrame(service: DevtoolsService, state: TuiState): void
   state.cronJobScrollOffset = clampScrollOffset(state.cronJobCursor, state.cronJobScrollOffset, jobs.length, rowCount);
   const visibleJobs = jobs.slice(state.cronJobScrollOffset, state.cronJobScrollOffset + rowCount);
   const activeRow = state.cronJobCursor - state.cronJobScrollOffset;
+  const schedulerStatus = loadSchedulerStatus(service.config);
 
   const lines: string[] = [];
   lines.push(drawHorizontal("top", width));
   lines.push(drawLine(` ${color("Scheduled Jobs", "magenta")}  total: ${jobs.length} `, width));
+  lines.push(drawLine(` ${formatSchedulerStatusLine(schedulerStatus.lastHeartbeatAt)} `, width));
   lines.push(drawLine(` ${color("keys:", "yellow")} ${formatKeybinding(["Enter"], "edit")}  ${formatKeybinding(["Space"], "toggle enabled")}  ${formatKeybinding(["Backspace"], "delete")}  ${formatKeybinding(["^J"], "back")} `, width));
   lines.push(drawHorizontal("divider", width));
   for (let index = 0; index < rowCount; index += 1) {
     const job = visibleJobs[index];
-    const text = job ? formatScheduledJob(job) : "";
+    const text = job ? formatScheduledJob(job, new Date()) : "";
     lines.push(drawLine(highlight(text, pad(text, width - 2), index === activeRow), width));
   }
   lines.push(drawHorizontal("bottom", width));
   process.stdout.write(`\x1b[2J\x1b[H${lines.join("\n")}`);
+}
+
+function renderCronJobDeleteConfirmFrame(service: DevtoolsService, state: TuiState): void {
+  const pendingDeleteJob = state.pendingDeleteJob;
+  if (!pendingDeleteJob) {
+    renderCronJobListFrame(service, state);
+    return;
+  }
+  const options: Array<{ label: string; key: DeleteConfirmOption }> = [
+    { label: "Yes, delete it", key: "yes" },
+    { label: "No, keep it", key: "no" },
+  ];
+  state.deleteConfirmCursor = Math.min(state.deleteConfirmCursor, Math.max(0, options.length - 1));
+  renderSimpleMenu(
+    service,
+    "Delete Scheduled Job",
+    pendingDeleteJob.name,
+    options.map((option) => option.label),
+    state.deleteConfirmCursor,
+    ` ${color("keys:", "yellow")} ${formatKeybinding(["Enter"], "confirm")}  ${formatKeybinding(["←/→"], "choose")}  ${formatKeybinding(["^J"], "cancel")} `,
+  );
 }
 
 function renderSimpleMenu(
@@ -684,6 +769,27 @@ function getFilteredProjects(
     lowered.length === 0 ||
     project.name.toLowerCase().includes(lowered) ||
     project.path.toLowerCase().includes(lowered),
+  );
+}
+
+function getFilteredProjectsForScript(
+  service: DevtoolsService,
+  state: Pick<TuiState, "projects" | "filter" | "selectedProjectIds" | "favoriteProjectPaths">,
+  projectSort: "alphabetical" | "modified",
+  script: ScriptEntry | undefined,
+): Project[] {
+  if (!script) {
+    return [];
+  }
+  if (!isScriptGroup(script) && script.scope === "global") {
+    return [];
+  }
+  return getFilteredProjects(
+    {
+      ...state,
+      projects: state.projects.filter((project) => script.projectTypes.some((projectType) => project.projectTypes.includes(projectType))),
+    },
+    projectSort,
   );
 }
 
@@ -731,6 +837,42 @@ function compareAlphabetically(left: Project, right: Project): number {
   return left.path.localeCompare(right.path);
 }
 
+export function sortScriptEntriesForFavorites(scripts: ScriptEntry[], favoriteScriptIds: string[]): ScriptEntry[] {
+  const blocks: Array<{ entries: ScriptEntry[]; favorite: boolean; index: number }> = [];
+
+  for (let index = 0; index < scripts.length;) {
+    const current = scripts[index]!;
+    const entries: ScriptEntry[] = [current];
+    index += 1;
+
+    if (isScriptGroup(current)) {
+      while (index < scripts.length) {
+        const next = scripts[index]!;
+        if (isScriptGroup(next) || next.group !== current.name) {
+          break;
+        }
+        entries.push(next);
+        index += 1;
+      }
+    }
+
+    blocks.push({
+      entries,
+      favorite: entries.some((entry) => favoriteScriptIds.includes(entry.scriptId)),
+      index: blocks.length,
+    });
+  }
+
+  return blocks
+    .sort((left, right) => {
+      if (left.favorite !== right.favorite) {
+        return left.favorite ? -1 : 1;
+      }
+      return left.index - right.index;
+    })
+    .flatMap((block) => block.entries);
+}
+
 function clampScrollOffset(cursor: number, currentOffset: number, itemCount: number, windowSize: number): number {
   const maxOffset = Math.max(0, itemCount - windowSize);
   if (cursor < currentOffset) {
@@ -746,21 +888,23 @@ function getSelectedProjects(state: Pick<TuiState, "projects" | "selectedProject
   return state.projects.filter((project) => state.selectedProjectIds.includes(project.identity));
 }
 
-function getScripts(service: DevtoolsService, state: Pick<TuiState, "projects" | "selectedProjectIds">): ScriptEntry[] {
-  const selected = getSelectedProjects(state);
-  return service.listScripts(selected.length > 0 ? selected : undefined);
+function getScripts(
+  service: DevtoolsService,
+  state: Pick<TuiState, "favoriteScriptIds">,
+): ScriptEntry[] {
+  return sortScriptEntriesForFavorites(service.listScripts(), state.favoriteScriptIds);
 }
 
-function getDraftScripts(service: DevtoolsService, draft: ScheduledJobDraft): ScriptEntry[] {
+function getDraftScripts(service: DevtoolsService, favoriteScriptIds: string[], draft: ScheduledJobDraft): ScriptEntry[] {
   const projects = service.listProjects({ explicitPaths: draft.projectPaths, refresh: true });
-  return service.listScripts(projects);
+  return sortScriptEntriesForFavorites(service.listScripts(projects), favoriteScriptIds);
 }
 
 function replaceSummaryLogs(results: ExecutionResult[], logs: string[]): void {
   logs.length = 0;
   let failures = 0;
   for (const result of results) {
-    logs.push(`[${result.success ? "OK" : "FAIL"}] ${result.project.path}`);
+    logs.push(`[${result.success ? "OK" : "FAIL"}] ${result.project?.path ?? "global"}`);
     if (result.message) {
       logs.push(result.message);
     }
@@ -780,7 +924,10 @@ function waitForResume(state: Pick<TuiState, "awaitingResume" | "resumeResolver"
 
 function showRunView(script: ScriptEntry, projectCount: number): void {
   process.stdout.write("\x1b[2J\x1b[H\x1b[?25h\x1b[0m");
-  process.stdout.write(`${color("Running", "yellow")} ${script.scriptId} on ${projectCount} project(s)\n\n`);
+  const scopeLabel = !isScriptGroup(script) && script.scope === "global"
+    ? "global"
+    : `${projectCount} project(s)`;
+  process.stdout.write(`${color("Running", "yellow")} ${script.scriptId} on ${scopeLabel}\n\n`);
 }
 
 function toggleAllFilteredProjects(state: Pick<TuiState, "selectedProjectIds">, filteredProjects: Project[]): void {
@@ -818,7 +965,7 @@ function highlight(original: string, padded: string, active: boolean): string {
   if (!active || !original) {
     return padded;
   }
-  return `\x1b[30;42m${padded}\x1b[0m`;
+  return `\x1b[30;103m${padded}\x1b[0m`;
 }
 
 function highlightInput(value: string): string {
@@ -853,29 +1000,29 @@ function stripAnsi(value: string): string {
 
 function renderMainKeyHelp(): string {
   const segments = [
-    formatKeybinding(["Tab"], "switch"),
-    formatKeybinding(["Space"], "select"),
-    formatKeybinding(["^A"], "all"),
-    formatKeybinding(["^F"], "favorite"),
-    formatKeybinding(["←/→"], "option"),
-    formatKeybinding(["Enter"], "run"),
-    formatKeybinding(["^R"], "refresh"),
-    formatKeybinding(["^J"], "jobs"),
-    formatKeybinding(["^C"], "quit"),
-    formatKeybinding(["^Q"], "quit"),
+    renderWordShortcut("Select All", "A"),
+    renderWordShortcut("Favorite", "F"),
+    renderWordShortcut("Reload project list", "R"),
+    renderWordShortcut("Jobs", "J"),
+    renderWordShortcut("Quit", "Q"),
   ];
-  return segments.join("  ");
+  return segments.join(color(" | ", "yellow"));
 }
 
-function formatScriptEntry(script: ScriptEntry, selectedVariants: Record<string, string>): string {
+function formatScriptEntry(
+  script: ScriptEntry,
+  selectedVariants: Record<string, string>,
+  favoriteScriptIds: string[] = [],
+): string {
+  const favoritePrefix = favoriteScriptIds.includes(script.scriptId) ? "⭐️ " : "";
   if (isScriptGroup(script)) {
-    return `▸ ${script.name}`;
+    return `${favoritePrefix}▸ ${script.name}`;
   }
   const variantSuffix = script.variant ? ` ${highlightVariantLabel(getSelectedVariantValue(script, selectedVariants))}` : "";
   if (script.group) {
-    return `  ${script.name}${variantSuffix}`;
+    return `${favoritePrefix}  ${script.name}${variantSuffix}`;
   }
-  return `${script.name}${variantSuffix}`;
+  return `${favoritePrefix}${script.name}${variantSuffix}`;
 }
 
 function getSelectedVariantValue(script: ScriptDefinition, selectedVariants: Record<string, string>): string {
@@ -936,14 +1083,16 @@ function buildScriptArgOverrides(
 async function runSelectedScript(service: DevtoolsService, state: TuiState, scripts: ScriptEntry[]): Promise<void> {
   const selectedProjects = getSelectedProjects(state);
   const selectedScript = scripts[state.scriptCursor];
-  if (!selectedScript || selectedProjects.length === 0) {
-    state.logs.push("Select at least one project and one script.");
+  const isGlobalScript = !selectedScript || isScriptGroup(selectedScript) ? false : selectedScript.scope === "global";
+  if (!selectedScript || (!isGlobalScript && selectedProjects.length === 0)) {
+    state.logs.push(isGlobalScript ? "Select a script." : "Select at least one project and one script.");
     return;
   }
   state.running = true;
   state.currentRunController = new AbortController();
-  state.logs.push(`Ran ${selectedScript.scriptId} on ${selectedProjects.length} project(s).`);
-  showRunView(selectedScript, selectedProjects.length);
+  const projectCount = isGlobalScript ? 0 : selectedProjects.length;
+  state.logs.push(`Ran ${selectedScript.scriptId} on ${isGlobalScript ? "global" : `${projectCount} project(s)`}.`);
+  showRunView(selectedScript, projectCount);
   try {
     const results = await service.runScript(
       selectedScript.scriptId,
@@ -966,6 +1115,7 @@ async function runSelectedScript(service: DevtoolsService, state: TuiState, scri
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
     }
+    renderFrame(service, state);
   }
 }
 
@@ -1095,10 +1245,12 @@ function wrapNumber(value: number, min: number, max: number): number {
   return value;
 }
 
-function formatScheduledJob(job: ScheduledJob): string {
+function formatScheduledJob(job: ScheduledJob, now: Date): string {
   const status = job.enabled ? "enabled" : "disabled";
   const lastRun = job.lastRunStatus ? ` | ${job.lastRunStatus}` : "";
-  return `${job.name} [${status}] | ${job.projectPaths.length} project(s) | ${job.selectedScriptIds.length} script(s) | ${formatScheduleSummary(job.schedule)}${lastRun}`;
+  const lastDue = formatShortDateTime(getLatestDueTime(job.schedule, now));
+  const nextDue = formatShortDateTime(getNextDueTime(job.schedule, now));
+  return `${job.name} [${status}] | last due ${lastDue} | next due ${nextDue}${lastRun}`;
 }
 
 function formatScheduleSummary(schedule: ScheduleDefinition): string {
@@ -1123,6 +1275,38 @@ function cloneSchedule(schedule: ScheduleDefinition): ScheduleDefinition {
 
 function formatKeybinding(keys: string[], action: string): string {
   return `${keys.map((key) => color(key, "cyan")).join("/")}${color(":", "yellow")} ${action}`;
+}
+
+function formatSchedulerStatusLine(lastHeartbeatAt?: string): string {
+  if (!lastHeartbeatAt) {
+    return `${color("runner", "yellow")}: idle`;
+  }
+  const lastHeartbeat = new Date(lastHeartbeatAt);
+  const active = Date.now() - lastHeartbeat.getTime() <= POLL_INTERVAL_MS * 2 + 5_000;
+  return `${color("runner", "yellow")}: ${active ? color("active", "cyan") : "idle"}  last beat ${formatShortDateTime(lastHeartbeat)}`;
+}
+
+function formatShortDateTime(date: Date | null | undefined): string {
+  if (!date) {
+    return "-";
+  }
+  const year = String(date.getFullYear()).slice(-2);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}:${minute}`;
+}
+
+function renderWordShortcut(label: string, letter: string): string {
+  const index = label.toLowerCase().indexOf(letter.toLowerCase());
+  if (index === -1) {
+    return label;
+  }
+  const prefix = label.slice(0, index);
+  const highlighted = `\x1b[4;36m${label[index]}\x1b[0m`;
+  const suffix = label.slice(index + 1);
+  return `${prefix}${highlighted}${suffix}`;
 }
 
 function isCommandKey(key: readline.Key, name: string): boolean {

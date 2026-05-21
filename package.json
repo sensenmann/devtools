@@ -3,6 +3,9 @@
   "version": "0.2.0",
   "description": "Project maintenance runner with CLI and terminal UI",
   "type": "module",
+  "dependencies": {
+    "playwright": "^1.54.1"
+  },
   "bin": {
     "devtools": "./src/cli.ts"
   },

@@ -7,7 +7,10 @@
 ```bash
 node src/cli.ts --help
 node src/cli.ts tui
+node src/cli.ts schedule-run
 ```
+
+`schedule-run` starts the polling scheduler for saved scheduled jobs.
 
 ## Configuration
 
@@ -15,4 +18,4 @@ The repo-local config file lives at `devtools.toml`.
 
 ## Scripts
 
-Scripts live below `scripts/<script-id>/` and need a `manifest.toml` that points to a built-in TypeScript module.
+Scripts live below `scripts/<script-id>/` and contain a `manifest.toml` plus a local `script.ts` module.

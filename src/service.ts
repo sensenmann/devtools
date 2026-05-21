@@ -59,7 +59,7 @@ export class DevtoolsService {
 
   async runScript(
     scriptId: string,
-    projects: Project[],
+    projects: Project[] = [],
     cliArgs: Record<string, unknown> = {},
     eventCallback?: (message: string) => void,
     signal?: AbortSignal,

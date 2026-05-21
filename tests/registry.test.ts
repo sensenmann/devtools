@@ -189,3 +189,39 @@ test("registry builds one-level executable groups before child scripts", () => {
   assert.equal(isScriptGroup(entries[0]!), true);
   assert.deepEqual(entries.slice(1).map((entry) => entry.scriptId), ["maven", "node", "git_pull"]);
 });
+
+test("registry keeps global scripts applicable without project matches", () => {
+  const projects: Project[] = [{
+    name: "backend",
+    path: "/tmp/backend",
+    projectType: "maven",
+    marker: "pom.xml",
+    projectTypes: ["maven"],
+    identity: "backend:/tmp/backend",
+  }];
+  const scripts: ScriptDefinition[] = [
+    {
+      scriptId: "openshift",
+      name: "OpenShift",
+      description: "",
+      projectTypes: ["maven", "node", "python"],
+      scope: "global",
+      entry: "openshiftOcLogin",
+      directory: "",
+      manifestPath: "",
+      defaultArgs: {},
+    },
+    {
+      scriptId: "node",
+      name: "Node",
+      description: "",
+      projectTypes: ["node"],
+      entry: "nodeDependencyUpdate",
+      directory: "",
+      manifestPath: "",
+      defaultArgs: {},
+    },
+  ];
+
+  assert.deepEqual(applicableScripts(scripts, projects).map((script) => script.scriptId), ["openshift"]);
+});

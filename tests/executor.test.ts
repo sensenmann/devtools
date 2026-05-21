@@ -250,6 +250,58 @@ test("executor cancels running external commands via abort signal", async () => 
   assert.ok(Date.now() - startedAt < 5_000);
 });
 
+test("executor runs global scripts once without project selection", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-executor-global-"));
+  fs.writeFileSync(
+    path.join(root, "script.ts"),
+    [
+      "export function globalTask() {",
+      "  process.stdout.write('global-run\\n');",
+      "  return { success: true, message: 'Global task completed.' };",
+      "}",
+    ].join("\n"),
+    "utf8",
+  );
+  const config: AppConfig = {
+    configPath: path.join(root, "devtools.toml"),
+    discovery: {
+      roots: [root],
+      includePatterns: [],
+      excludePatterns: [],
+      projectTypes: ["node"],
+      cacheFile: path.join(root, ".cache.json"),
+    },
+    scripts: {
+      directory: path.join(root, "scripts"),
+    },
+    tui: {
+      favoritesFile: path.join(root, ".favorites.json"),
+      scriptStateFile: path.join(root, ".script-state.json"),
+      scheduledJobsFile: path.join(root, ".scheduled-jobs.json"),
+      projectRows: 10,
+      summaryRows: 6,
+      projectSort: "alphabetical",
+    },
+  };
+  const script: ScriptDefinition = {
+    scriptId: "global_task",
+    name: "Global Task",
+    description: "",
+    projectTypes: ["maven", "node", "python"],
+    scope: "global",
+    entry: "globalTask",
+    directory: root,
+    manifestPath: path.join(root, "manifest.toml"),
+    defaultArgs: {},
+  };
+
+  const results = await runScriptForProjects(config, script, []);
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.success, true);
+  assert.equal(results[0]?.project, undefined);
+  assert.match(results[0]?.output ?? "", /global-run/);
+});
+
 function writeEchoProjectModule(directory: string): void {
   fs.writeFileSync(
     path.join(directory, "script.ts"),

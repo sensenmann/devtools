@@ -1,0 +1,6 @@
+id = "openshift_oc_login"
+name = "🔐 OpenShift login"
+description = "Log into OpenShift in a visible browser, retrieve the current oc login command, print it, and execute it."
+project_types = ["maven", "node", "python"]
+scope = "global"
+entry = "openshiftOcLogin"

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { DevtoolsService } from "./service.ts";
-import { isScriptGroup } from "./registry.ts";
+import { getScriptEntryById, isScriptGroup, loadScripts } from "./registry.ts";
 import { runSchedulerLoop } from "./scheduler.ts";
 import { runTui } from "./tui.ts";
 
@@ -93,13 +93,17 @@ async function handleRun(service: DevtoolsService, args: string[]): Promise<numb
     throw new Error("Missing script id.");
   }
   const options = parseRunArgs(rest);
+  const scriptEntry = getScriptEntryById(loadScripts(service.config), scriptId);
+  if (!scriptEntry) {
+    throw new Error(`Unknown script id: ${scriptId}`);
+  }
   const projects = service.listProjects({
     explicitPaths: options.paths,
     projectType: options.projectType,
     nameFilter: options.nameFilter,
     refresh: options.refresh,
   });
-  if (projects.length === 0) {
+  if (!isScriptGroup(scriptEntry) && scriptEntry.scope !== "global" && projects.length === 0) {
     process.stdout.write("No matching projects found.\n");
     return 1;
   }
@@ -109,7 +113,7 @@ async function handleRun(service: DevtoolsService, args: string[]): Promise<numb
 
   let failures = 0;
   for (const result of results) {
-    process.stdout.write(`\n[${result.success ? "OK" : "FAIL"}] ${result.project.path}\n`);
+    process.stdout.write(`\n[${result.success ? "OK" : "FAIL"}] ${result.project?.path ?? "global"}\n`);
     if (result.message) {
       process.stdout.write(`${result.message}\n`);
     }

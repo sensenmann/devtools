@@ -13,6 +13,15 @@ export async function runScriptForProjects(
   signal?: AbortSignal,
   outputMode: RunOutputMode = "capture",
 ): Promise<ExecutionResult[]> {
+  if (script.scope === "global") {
+    eventCallback?.(`[start] ${script.scriptId} -> global`);
+    const result = await runScriptForProject(config, script, undefined, cliArgs, eventCallback, signal, outputMode);
+    const prefix = result.success ? "ok" : "fail";
+    const detail = result.message || result.error;
+    eventCallback?.(`[${prefix}] global :: ${detail}`);
+    return [result];
+  }
+
   const results: ExecutionResult[] = [];
   for (const project of projects) {
     if (signal?.aborted) {
@@ -45,7 +54,7 @@ export async function runScriptForProjects(
 export async function runScriptForProject(
   config: AppConfig,
   script: ScriptDefinition,
-  project: Project,
+  project?: Project,
   cliArgs: Record<string, unknown> = {},
   eventCallback?: (message: string) => void,
   signal?: AbortSignal,
@@ -131,5 +140,8 @@ async function loadEntry(script: ScriptDefinition) {
 }
 
 function supportsScript(script: ScriptDefinition, project: Project): boolean {
+  if (script.scope === "global") {
+    return true;
+  }
   return script.projectTypes.some((projectType) => project.projectTypes.includes(projectType));
 }

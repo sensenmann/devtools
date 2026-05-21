@@ -1,9 +1,10 @@
 import type { DevtoolsService } from "./service.ts";
 import type { ScheduledJob, ScheduledWeekday, ScriptDefinition } from "./models.ts";
 import { loadScheduledJobs, saveScheduledJobs } from "./scheduled-jobs.ts";
+import { saveSchedulerHeartbeat, saveSchedulerStopped } from "./scheduler-status.ts";
 import { getScriptEntryById, isScriptGroup, loadScripts } from "./registry.ts";
 
-const POLL_INTERVAL_MS = 30_000;
+export const POLL_INTERVAL_MS = 30_000;
 
 export async function runSchedulerLoop(service: DevtoolsService): Promise<void> {
   const runningJobs = new Map<string, AbortController>();
@@ -28,6 +29,7 @@ export async function runSchedulerLoop(service: DevtoolsService): Promise<void> 
       await tickScheduler(service, runningJobs);
     }
   } finally {
+    saveSchedulerStopped(service.config, new Date().toISOString());
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
   }
@@ -35,6 +37,7 @@ export async function runSchedulerLoop(service: DevtoolsService): Promise<void> 
 
 export async function tickScheduler(service: DevtoolsService, runningJobs: Map<string, AbortController>): Promise<void> {
   const now = new Date();
+  saveSchedulerHeartbeat(service.config, now.toISOString());
   const jobs = loadScheduledJobs(service.config);
   const scripts = loadScripts(service.config);
 
@@ -114,6 +117,59 @@ export function getLatestDueTime(schedule: ScheduledJob["schedule"], now: Date):
   );
   if (due.getTime() > now.getTime()) {
     due.setDate(due.getDate() - 7);
+  }
+  return due;
+}
+
+export function getNextDueTime(schedule: ScheduledJob["schedule"], now: Date): Date | null {
+  if (schedule.kind === "hourly") {
+    const due = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      now.getHours() + 1,
+      0,
+      0,
+      0,
+    );
+    return due;
+  }
+
+  const [hour, minute] = schedule.time.split(":").map((part) => Number(part));
+  if (Number.isNaN(hour) || Number.isNaN(minute)) {
+    return null;
+  }
+
+  if (schedule.kind === "daily") {
+    const due = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      hour,
+      minute,
+      0,
+      0,
+    );
+    if (due.getTime() <= now.getTime()) {
+      due.setDate(due.getDate() + 1);
+    }
+    return due;
+  }
+
+  const targetWeekday = weekdayToIndex(schedule.weekday);
+  const currentWeekday = getLocalWeekday(now);
+  const dayDelta = (targetWeekday - currentWeekday + 7) % 7;
+  const due = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() + dayDelta,
+    hour,
+    minute,
+    0,
+    0,
+  );
+  if (due.getTime() <= now.getTime()) {
+    due.setDate(due.getDate() + 7);
   }
   return due;
 }

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { AppConfig, Project, ProjectType, ScriptDefinition, ScriptEntry, ScriptGroupDefinition } from "./models.ts";
+import type { AppConfig, Project, ProjectType, ScriptDefinition, ScriptEntry, ScriptGroupDefinition, ScriptScope } from "./models.ts";
 import { parseSimpleToml } from "./toml.ts";
 
 const MANIFEST_NAME = "manifest.toml";
@@ -11,6 +11,7 @@ interface RawManifest {
   name?: string;
   description?: string;
   project_types?: ProjectType[];
+  scope?: ScriptScope;
   entry?: string;
   default_args?: Record<string, unknown>;
   group?: string;
@@ -46,6 +47,7 @@ export function applicableScripts(scripts: ScriptDefinition[], projects: Project
     return scripts;
   }
   return scripts.filter((script) =>
+    script.scope === "global" ||
     projects.some((project) => script.projectTypes.some((value) => project.projectTypes.includes(value))),
   );
 }
@@ -101,6 +103,7 @@ function loadManifest(directory: string, manifestPath: string): ScriptDefinition
     name: String(raw.name),
     description: String(raw.description),
     projectTypes: [...(raw.project_types ?? [])],
+    scope: raw.scope === "global" ? "global" : "project",
     entry: String(raw.entry),
     directory,
     manifestPath,
