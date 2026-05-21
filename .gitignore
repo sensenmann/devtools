@@ -4,6 +4,11 @@ __pycache__/
 .idea/
 .DS_Store
 .devtools-project-cache.json
-build/
+coverage/
 dist/
+node_modules/
+*.tsbuildinfo
+build/
 *.pyc
+src/devtools.egg-info/
+tests/__pycache__/

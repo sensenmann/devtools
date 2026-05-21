@@ -2,9 +2,8 @@ id = "node_dependency_update"
 name = "Node dependency update"
 description = "Run npm audit fix for all package.json locations inside the selected project."
 project_types = ["node"]
-entry = "runner.py:main"
+entry = "nodeDependencyUpdate"
 
 [default_args]
 force = false
 registry = "https://registry.npmjs.org"
-
