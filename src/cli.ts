@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { DevtoolsService } from "./service.ts";
 import { isScriptGroup } from "./registry.ts";
+import { runSchedulerLoop } from "./scheduler.ts";
 import { runTui } from "./tui.ts";
 
 interface ParsedArgs {
@@ -22,6 +23,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return handleRun(service, parsed.rest);
     case "refresh-cache":
       return handleRefreshCache(service);
+    case "schedule-run":
+      return await handleScheduleRun(service);
     case "tui":
       return await handleTui(service);
     case "--help":
@@ -134,6 +137,11 @@ async function handleTui(service: DevtoolsService): Promise<number> {
   return 0;
 }
 
+async function handleScheduleRun(service: DevtoolsService): Promise<number> {
+  await runSchedulerLoop(service);
+  return 0;
+}
+
 function parseListArgs(args: string[]): {
   paths?: string[];
   projectType?: string;
@@ -230,6 +238,7 @@ function printHelp(): void {
       "  scripts [--path <project>] [--refresh]",
       "  run <script-id> [--path <project>] [--type <type>] [--filter <text>] [--refresh] [--arg key=value]",
       "  refresh-cache",
+      "  schedule-run",
       "  tui",
       "",
     ].join("\n"),

@@ -3,12 +3,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { runScriptForProject, runScriptForProjects } from "../src/executor.ts";
 import type { AppConfig, Project, ScriptDefinition } from "../src/models.ts";
 
+const REPO_ROOT = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
+
 test("executor captures output from builtin scripts", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-executor-"));
+  writeEchoProjectModule(root);
   const config: AppConfig = {
     configPath: path.join(root, "devtools.toml"),
     discovery: {
@@ -20,6 +24,14 @@ test("executor captures output from builtin scripts", async () => {
     },
     scripts: {
       directory: path.join(root, "scripts"),
+    },
+    tui: {
+      favoritesFile: path.join(root, ".favorites.json"),
+      scriptStateFile: path.join(root, ".script-state.json"),
+      scheduledJobsFile: path.join(root, ".scheduled-jobs.json"),
+      projectRows: 10,
+      summaryRows: 6,
+      projectSort: "alphabetical",
     },
   };
   const script: ScriptDefinition = {
@@ -48,6 +60,7 @@ test("executor captures output from builtin scripts", async () => {
 
 test("executor skips projects that do not support the selected script", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-executor-skip-"));
+  writeEchoProjectModule(root);
   const config: AppConfig = {
     configPath: path.join(root, "devtools.toml"),
     discovery: {
@@ -59,6 +72,14 @@ test("executor skips projects that do not support the selected script", async ()
     },
     scripts: {
       directory: path.join(root, "scripts"),
+    },
+    tui: {
+      favoritesFile: path.join(root, ".favorites.json"),
+      scriptStateFile: path.join(root, ".script-state.json"),
+      scheduledJobsFile: path.join(root, ".scheduled-jobs.json"),
+      projectRows: 10,
+      summaryRows: 6,
+      projectSort: "alphabetical",
     },
   };
   const script: ScriptDefinition = {
@@ -121,6 +142,14 @@ test("executor forwards command log events before builtin execution", async () =
     scripts: {
       directory: path.join(root, "scripts"),
     },
+    tui: {
+      favoritesFile: path.join(root, ".favorites.json"),
+      scriptStateFile: path.join(root, ".script-state.json"),
+      scheduledJobsFile: path.join(root, ".scheduled-jobs.json"),
+      projectRows: 10,
+      summaryRows: 6,
+      projectSort: "alphabetical",
+    },
   };
   const script: ScriptDefinition = {
     scriptId: "node_only",
@@ -128,8 +157,8 @@ test("executor forwards command log events before builtin execution", async () =
     description: "",
     projectTypes: ["node"],
     entry: "nodeDependencyUpdate",
-    directory: root,
-    manifestPath: path.join(root, "manifest.toml"),
+    directory: path.join(REPO_ROOT, "scripts/node_dependency_update"),
+    manifestPath: path.join(REPO_ROOT, "scripts/node_dependency_update/manifest.toml"),
     defaultArgs: {},
   };
   const project: Project = {
@@ -181,6 +210,14 @@ test("executor cancels running external commands via abort signal", async () => 
     scripts: {
       directory: path.join(root, "scripts"),
     },
+    tui: {
+      favoritesFile: path.join(root, ".favorites.json"),
+      scriptStateFile: path.join(root, ".script-state.json"),
+      scheduledJobsFile: path.join(root, ".scheduled-jobs.json"),
+      projectRows: 10,
+      summaryRows: 6,
+      projectSort: "alphabetical",
+    },
   };
   const script: ScriptDefinition = {
     scriptId: "node_only",
@@ -188,8 +225,8 @@ test("executor cancels running external commands via abort signal", async () => 
     description: "",
     projectTypes: ["node"],
     entry: "nodeDependencyUpdate",
-    directory: root,
-    manifestPath: path.join(root, "manifest.toml"),
+    directory: path.join(REPO_ROOT, "scripts/node_dependency_update"),
+    manifestPath: path.join(REPO_ROOT, "scripts/node_dependency_update/manifest.toml"),
     defaultArgs: {},
   };
   const project: Project = {
@@ -212,3 +249,21 @@ test("executor cancels running external commands via abort signal", async () => 
   assert.match(result.message, /cancelled/i);
   assert.ok(Date.now() - startedAt < 5_000);
 });
+
+function writeEchoProjectModule(directory: string): void {
+  fs.writeFileSync(
+    path.join(directory, "script.ts"),
+    [
+      "export function echoProject(context) {",
+      "  process.stdout.write(`project=${context.project.name}\\n`);",
+      "  process.stdout.write(`path=${context.project.path}\\n`);",
+      "  process.stdout.write(`type=${context.project.projectType}\\n`);",
+      "  if (Boolean(context.args.include_marker ?? true)) {",
+      "    process.stdout.write(`marker=${context.project.marker}\\n`);",
+      "  }",
+      "  return { success: true, message: 'Project info printed.' };",
+      "}",
+    ].join("\n"),
+    "utf8",
+  );
+}

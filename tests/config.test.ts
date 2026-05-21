@@ -26,6 +26,7 @@ summary_rows = 8
 project_sort = "modified"
 favorites_file = ".favorites.json"
 script_state_file = ".script-state.json"
+scheduled_jobs_file = ".scheduled-jobs.json"
 `.trim(),
     "utf8",
   );
@@ -40,4 +41,5 @@ script_state_file = ".script-state.json"
   assert.equal(config.tui.projectSort, "modified");
   assert.equal(config.tui.favoritesFile, path.resolve(root, ".favorites.json"));
   assert.equal(config.tui.scriptStateFile, path.resolve(root, ".script-state.json"));
+  assert.equal(config.tui.scheduledJobsFile, path.resolve(root, ".scheduled-jobs.json"));
 });

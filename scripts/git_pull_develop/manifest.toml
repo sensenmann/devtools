@@ -1,0 +1,6 @@
+id = "git_pull_develop"
+name = "🔀 Git merge develop"
+description = "Run git pull origin develop into the current branch in the selected project root."
+project_types = ["maven", "node", "python"]
+entry = "gitPullDevelop"
+group = "Git Update"

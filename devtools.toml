@@ -31,3 +31,6 @@ project_sort = "alphabetical"
 
 # Optional: where selected script options are stored.
 # script_state_file = ".devtools-script-state.json"
+
+# Optional: where scheduled jobs are stored.
+# scheduled_jobs_file = ".devtools-scheduled-jobs.json"

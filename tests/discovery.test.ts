@@ -20,6 +20,14 @@ function makeConfig(root: string): AppConfig {
     scripts: {
       directory: path.join(root, "scripts"),
     },
+    tui: {
+      favoritesFile: path.join(root, ".favorites.json"),
+      scriptStateFile: path.join(root, ".script-state.json"),
+      scheduledJobsFile: path.join(root, ".scheduled-jobs.json"),
+      projectRows: 10,
+      summaryRows: 6,
+      projectSort: "alphabetical",
+    },
   };
 }
 

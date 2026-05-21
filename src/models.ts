@@ -25,6 +25,7 @@ export interface TuiConfig {
   projectSort: TuiProjectSort;
   favoritesFile: string;
   scriptStateFile: string;
+  scheduledJobsFile: string;
 }
 
 export type TuiProjectSort = "alphabetical" | "modified";
@@ -102,5 +103,29 @@ export interface BuiltinScriptResponse {
 }
 
 export type RunOutputMode = "capture" | "passthrough";
+
+export type ScheduleDefinition =
+  | { kind: "hourly" }
+  | { kind: "daily"; time: string }
+  | { kind: "weekly"; weekday: ScheduledWeekday; time: string };
+
+export type ScheduledWeekday = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
+
+export interface ScheduledJob {
+  jobId: string;
+  name: string;
+  enabled: boolean;
+  projectPaths: string[];
+  selectedScriptIds: string[];
+  selectedVariants: Record<string, string>;
+  schedule: ScheduleDefinition;
+  createdAt: string;
+  updatedAt: string;
+  lastTriggeredAt?: string;
+  lastRunStartedAt?: string;
+  lastRunFinishedAt?: string;
+  lastRunStatus?: "success" | "failure" | "skipped";
+  lastRunSummary?: string;
+}
 
 export type BuiltinScriptRunner = (context: ScriptContext) => Promise<BuiltinScriptResponse> | BuiltinScriptResponse;

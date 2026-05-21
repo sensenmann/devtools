@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { BUILTIN_SCRIPT_MODULES } from "./script-modules.ts";
 import type { AppConfig, ExecutionResult, Project, RunOutputMode, ScriptContext, ScriptDefinition } from "./models.ts";
 
 export async function runScriptForProjects(
@@ -88,7 +89,7 @@ export async function runScriptForProject(
         error: "",
       };
     }
-    const runner = loadEntry(script);
+    const runner = await loadEntry(script);
     if (shouldCaptureOutput) {
       process.stdout.write = interceptStdout as typeof process.stdout.write;
       process.stderr.write = interceptStderr as typeof process.stderr.write;
@@ -119,10 +120,12 @@ export async function runScriptForProject(
   }
 }
 
-function loadEntry(script: ScriptDefinition) {
-  const runner = BUILTIN_SCRIPT_MODULES[script.entry];
+async function loadEntry(script: ScriptDefinition) {
+  const modulePath = path.join(script.directory, "script.ts");
+  const scriptModule = await import(pathToFileURL(modulePath).href);
+  const runner = scriptModule[script.entry];
   if (!runner) {
-    throw new Error(`Unknown script entry for ${script.scriptId}: ${script.entry}`);
+    throw new Error(`Unknown script entry for ${script.scriptId}: ${script.entry} in ${modulePath}`);
   }
   return runner;
 }

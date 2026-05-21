@@ -25,6 +25,7 @@ interface RawConfig {
     project_sort?: TuiProjectSort;
     favorites_file?: string;
     script_state_file?: string;
+    scheduled_jobs_file?: string;
   };
 }
 
@@ -56,6 +57,9 @@ export function loadConfig(configPath?: string, cwd?: string): AppConfig {
   const scriptStateFile = path.isAbsolute(tuiRaw.script_state_file ?? "")
     ? normalizePath(tuiRaw.script_state_file ?? "")
     : path.resolve(path.dirname(resolved), tuiRaw.script_state_file ?? ".devtools-script-state.json");
+  const scheduledJobsFile = path.isAbsolute(tuiRaw.scheduled_jobs_file ?? "")
+    ? normalizePath(tuiRaw.scheduled_jobs_file ?? "")
+    : path.resolve(path.dirname(resolved), tuiRaw.scheduled_jobs_file ?? ".devtools-scheduled-jobs.json");
 
   return {
     configPath: resolved,
@@ -76,6 +80,7 @@ export function loadConfig(configPath?: string, cwd?: string): AppConfig {
       projectSort: tuiRaw.project_sort === "modified" ? "modified" : "alphabetical",
       favoritesFile,
       scriptStateFile,
+      scheduledJobsFile,
     },
   };
 }

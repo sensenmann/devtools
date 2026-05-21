@@ -3,15 +3,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-import {
-  findProjectFileDirs,
-  runGitPull,
-  runMavenCleanInstall,
-  runMavenDependencyUpdate,
-  runNodeAuditFix,
-} from "../src/builtin-scripts.ts";
+import { gitPull } from "../scripts/git_pull/script.ts";
+import { gitPullDevelop } from "../scripts/git_pull_develop/script.ts";
+import { mavenCleanInstall } from "../scripts/maven_clean_install/script.ts";
+import { mavenDependencyUpdate } from "../scripts/maven_dependency_update/script.ts";
+import { nodeDependencyUpdate } from "../scripts/node_dependency_update/script.ts";
+import { findProjectFileDirs } from "../src/script-runtime.ts";
 import type { Project, ScriptContext, ScriptDefinition } from "../src/models.ts";
+
+const REPO_ROOT = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
 test("builtin scripts find nested package.json locations and skip node_modules", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-node-"));
@@ -40,10 +42,19 @@ test("builtin scripts build node audit fix commands", async () => {
   process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
 
   const logs: string[] = [];
-  const result = await runNodeAuditFix(buildContext(root, "node", "nodeDependencyUpdate", {
-    force: false,
-    registry: "https://registry.npmjs.org",
-  }, (message) => logs.push(message)));
+  const result = await nodeDependencyUpdate(
+    buildContext(
+      root,
+      "node",
+      "nodeDependencyUpdate",
+      {
+        force: false,
+        registry: "https://registry.npmjs.org",
+      },
+      "scripts/node_dependency_update",
+      (message) => logs.push(message),
+    ),
+  );
   process.env.PATH = originalPath;
   assert.equal(result.success, true);
   assert.match(logs[0] ?? "", /\[cmd\] \. :: .*npm audit fix --registry=https:\/\/registry\.npmjs\.org/);
@@ -66,9 +77,17 @@ test("builtin scripts build maven update commands", async () => {
   const originalPath = process.env.PATH ?? "";
   process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
 
-  const result = await runMavenDependencyUpdate(buildContext(root, "maven", "mavenDependencyUpdate", {
-    allow_major_updates: false,
-  }));
+  const result = await mavenDependencyUpdate(
+    buildContext(
+      root,
+      "maven",
+      "mavenDependencyUpdate",
+      {
+        allow_major_updates: false,
+      },
+      "scripts/maven_dependency_update",
+    ),
+  );
   process.env.PATH = originalPath;
   assert.equal(result.success, true);
   assert.deepEqual(
@@ -95,7 +114,7 @@ test("builtin scripts build git pull command", async () => {
   const originalPath = process.env.PATH ?? "";
   process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
 
-  const result = await runGitPull(buildContext(root, "node", "gitPull", {}));
+  const result = await gitPull(buildContext(root, "node", "gitPull", {}, "scripts/git_pull"));
   process.env.PATH = originalPath;
   assert.equal(result.success, true);
   assert.deepEqual(
@@ -117,7 +136,9 @@ test("builtin scripts build maven clean install command", async () => {
   const originalPath = process.env.PATH ?? "";
   process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
 
-  const result = await runMavenCleanInstall(buildContext(root, "maven", "mavenCleanInstall", {}));
+  const result = await mavenCleanInstall(
+    buildContext(root, "maven", "mavenCleanInstall", {}, "scripts/maven_clean_install"),
+  );
   process.env.PATH = originalPath;
   assert.equal(result.success, true);
   assert.deepEqual(
@@ -126,11 +147,35 @@ test("builtin scripts build maven clean install command", async () => {
   );
 });
 
+test("builtin scripts build git pull develop command", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-git-run-develop-"));
+  const binDir = createFakeBin(root, "git", (filePath) =>
+    [
+      "#!/bin/sh",
+      `printf '%s\n' "$@" > "${filePath}"`,
+      "exit 0",
+    ].join("\n"),
+  );
+  const originalPath = process.env.PATH ?? "";
+  process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
+
+  const result = await gitPullDevelop(
+    buildContext(root, "node", "gitPullDevelop", {}, "scripts/git_pull_develop"),
+  );
+  process.env.PATH = originalPath;
+  assert.equal(result.success, true);
+  assert.deepEqual(
+    fs.readFileSync(path.join(binDir, "git.args"), "utf8").trim().split(/\r?\n/),
+    ["pull", "origin", "develop"],
+  );
+});
+
 function buildContext(
   projectRoot: string,
   projectType: Project["projectType"],
   entry: string,
   defaultArgs: Record<string, unknown>,
+  scriptDirectory: string,
   log?: (message: string) => void,
 ): ScriptContext {
   const project: Project = {
@@ -147,8 +192,8 @@ function buildContext(
     description: "",
     projectTypes: [projectType],
     entry,
-    directory: projectRoot,
-    manifestPath: path.join(projectRoot, "manifest.toml"),
+    directory: path.join(REPO_ROOT, scriptDirectory),
+    manifestPath: path.join(REPO_ROOT, scriptDirectory, "manifest.toml"),
     defaultArgs,
   };
   return {

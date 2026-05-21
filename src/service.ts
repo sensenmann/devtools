@@ -2,7 +2,8 @@ import { loadConfig } from "./config.ts";
 import { discoverExplicitProjects, discoverProjects, filterProjects } from "./discovery.ts";
 import { runScriptForProjects } from "./executor.ts";
 import { applicableScripts, buildScriptEntries, expandScriptEntry, getScriptEntryById, loadScripts } from "./registry.ts";
-import type { AppConfig, ExecutionResult, Project, RunOutputMode, ScriptDefinition, ScriptEntry } from "./models.ts";
+import { createScheduledJob, deleteScheduledJob, loadScheduledJobs, upsertScheduledJob } from "./scheduled-jobs.ts";
+import type { AppConfig, ExecutionResult, Project, RunOutputMode, ScheduledJob, ScriptDefinition, ScriptEntry } from "./models.ts";
 
 export class DevtoolsService {
   readonly config: AppConfig;
@@ -35,6 +36,25 @@ export class DevtoolsService {
   listScripts(projects?: Project[]): ScriptEntry[] {
     const scripts = loadScripts(this.config);
     return buildScriptEntries(projects ? applicableScripts(scripts, projects) : scripts);
+  }
+
+  listScheduledJobs(): ScheduledJob[] {
+    return loadScheduledJobs(this.config);
+  }
+
+  createScheduledJob(input: Omit<ScheduledJob, "jobId" | "createdAt" | "updatedAt">): ScheduledJob {
+    const job = createScheduledJob(input);
+    upsertScheduledJob(this.config, job);
+    return job;
+  }
+
+  saveScheduledJob(job: ScheduledJob): ScheduledJob {
+    upsertScheduledJob(this.config, job);
+    return job;
+  }
+
+  deleteScheduledJob(jobId: string): ScheduledJob[] {
+    return deleteScheduledJob(this.config, jobId);
   }
 
   async runScript(
