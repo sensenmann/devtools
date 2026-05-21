@@ -1,0 +1,14 @@
+[discovery]
+roots = ["~/Develop"]
+include_patterns = []
+exclude_patterns = [
+  "**/.git",
+  "**/node_modules",
+  "**/target",
+  "**/.venv",
+]
+project_types = ["maven", "node", "python"]
+cache_file = ".devtools-project-cache.json"
+
+[scripts]
+directory = "scripts"
