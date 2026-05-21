@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { AppConfig, ProjectType } from "./models.ts";
+import type { AppConfig, ProjectType, TuiProjectSort } from "./models.ts";
 import { normalizePath } from "./path-utils.ts";
 import { parseSimpleToml } from "./toml.ts";
 
@@ -18,6 +18,14 @@ interface RawConfig {
   scripts?: {
     directory?: string;
   };
+  tui?: {
+    width?: number;
+    project_rows?: number;
+    summary_rows?: number;
+    project_sort?: TuiProjectSort;
+    favorites_file?: string;
+    script_state_file?: string;
+  };
 }
 
 export function resolveConfigPath(configPath?: string, cwd: string = process.cwd()): string {
@@ -33,6 +41,7 @@ export function loadConfig(configPath?: string, cwd?: string): AppConfig {
   const raw = parseSimpleToml(rawText) as RawConfig;
   const discoveryRaw = raw.discovery ?? {};
   const scriptsRaw = raw.scripts ?? {};
+  const tuiRaw = raw.tui ?? {};
 
   const roots = (discoveryRaw.roots ?? ["~/Develop"]).map((item) => normalizePath(item));
   const cacheFile = path.isAbsolute(discoveryRaw.cache_file ?? "")
@@ -41,6 +50,12 @@ export function loadConfig(configPath?: string, cwd?: string): AppConfig {
   const scriptsDirectory = path.isAbsolute(scriptsRaw.directory ?? "")
     ? normalizePath(scriptsRaw.directory ?? "")
     : path.resolve(path.dirname(resolved), scriptsRaw.directory ?? "scripts");
+  const favoritesFile = path.isAbsolute(tuiRaw.favorites_file ?? "")
+    ? normalizePath(tuiRaw.favorites_file ?? "")
+    : path.resolve(path.dirname(resolved), tuiRaw.favorites_file ?? ".devtools-favorites.json");
+  const scriptStateFile = path.isAbsolute(tuiRaw.script_state_file ?? "")
+    ? normalizePath(tuiRaw.script_state_file ?? "")
+    : path.resolve(path.dirname(resolved), tuiRaw.script_state_file ?? ".devtools-script-state.json");
 
   return {
     configPath: resolved,
@@ -53,6 +68,14 @@ export function loadConfig(configPath?: string, cwd?: string): AppConfig {
     },
     scripts: {
       directory: scriptsDirectory,
+    },
+    tui: {
+      width: typeof tuiRaw.width === "number" && tuiRaw.width > 0 ? tuiRaw.width : undefined,
+      projectRows: typeof tuiRaw.project_rows === "number" && tuiRaw.project_rows > 0 ? tuiRaw.project_rows : 18,
+      summaryRows: typeof tuiRaw.summary_rows === "number" && tuiRaw.summary_rows > 0 ? tuiRaw.summary_rows : 6,
+      projectSort: tuiRaw.project_sort === "modified" ? "modified" : "alphabetical",
+      favoritesFile,
+      scriptStateFile,
     },
   };
 }

@@ -1,0 +1,5 @@
+id = "git_pull"
+name = "⬇️ Git pull"
+description = "Run git pull in the selected project root."
+project_types = ["maven", "node", "python"]
+entry = "gitPull"

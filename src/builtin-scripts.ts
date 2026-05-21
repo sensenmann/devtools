@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 import type { BuiltinScriptResponse, ScriptContext } from "./models.ts";
 
@@ -11,7 +11,7 @@ export function createRunId(): string {
   return randomUUID().replaceAll("-", "");
 }
 
-export function runNodeAuditFix(context: ScriptContext): BuiltinScriptResponse {
+export async function runNodeAuditFix(context: ScriptContext): Promise<BuiltinScriptResponse> {
   const npmPath = resolveExecutable("npm");
   if (!npmPath) {
     return { success: false, message: "npm was not found on PATH." };
@@ -30,10 +30,18 @@ export function runNodeAuditFix(context: ScriptContext): BuiltinScriptResponse {
     command.push("--force");
   }
   command.push(`--registry=${registry}`);
-  return runCommandAcrossDirs(projectRoot, packageDirs, command, "npm audit fix");
+  return await runCommandAcrossDirs(
+    projectRoot,
+    packageDirs,
+    command,
+    "npm audit fix",
+    context.log,
+    context.signal,
+    context.outputMode ?? "capture",
+  );
 }
 
-export function runMavenDependencyUpdate(context: ScriptContext): BuiltinScriptResponse {
+export async function runMavenDependencyUpdate(context: ScriptContext): Promise<BuiltinScriptResponse> {
   const mvnPath = resolveExecutable("mvn");
   if (!mvnPath) {
     return { success: false, message: "mvn was not found on PATH." };
@@ -51,7 +59,58 @@ export function runMavenDependencyUpdate(context: ScriptContext): BuiltinScriptR
     command.push("-DallowMajorUpdates=false");
   }
   command.push("-f", "pom.xml");
-  return runCommandAcrossDirs(projectRoot, pomDirs, command, "maven dependency update");
+  return await runCommandAcrossDirs(
+    projectRoot,
+    pomDirs,
+    command,
+    "maven dependency update",
+    context.log,
+    context.signal,
+    context.outputMode ?? "capture",
+  );
+}
+
+export async function runGitPull(context: ScriptContext): Promise<BuiltinScriptResponse> {
+  const gitPath = resolveExecutable("git");
+  if (!gitPath) {
+    return { success: false, message: "git was not found on PATH." };
+  }
+
+  const projectRoot = path.resolve(context.project.path);
+  const command = [gitPath, "pull"];
+  return await runCommandAcrossDirs(
+    projectRoot,
+    [projectRoot],
+    command,
+    "git pull",
+    context.log,
+    context.signal,
+    context.outputMode ?? "capture",
+  );
+}
+
+export async function runMavenCleanInstall(context: ScriptContext): Promise<BuiltinScriptResponse> {
+  const mvnPath = resolveExecutable("mvn");
+  if (!mvnPath) {
+    return { success: false, message: "mvn was not found on PATH." };
+  }
+
+  const projectRoot = path.resolve(context.project.path);
+  const pomDirs = findProjectFileDirs(projectRoot, "pom.xml");
+  if (pomDirs.length === 0) {
+    return { success: false, message: "No pom.xml files found below the selected project." };
+  }
+
+  const command = [mvnPath, "clean", "install", "-f", "pom.xml"];
+  return await runCommandAcrossDirs(
+    projectRoot,
+    pomDirs,
+    command,
+    "maven clean install",
+    context.log,
+    context.signal,
+    context.outputMode ?? "capture",
+  );
 }
 
 export function runEchoProject(context: ScriptContext): BuiltinScriptResponse {
@@ -88,22 +147,46 @@ function runCommandAcrossDirs(
   targetDirs: string[],
   command: string[],
   successLabel: string,
-): BuiltinScriptResponse {
+  log?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+): Promise<BuiltinScriptResponse> {
+  return runCommandAcrossDirsInternal(projectRoot, targetDirs, command, successLabel, log, signal, outputMode);
+}
+
+async function runCommandAcrossDirsInternal(
+  projectRoot: string,
+  targetDirs: string[],
+  command: string[],
+  successLabel: string,
+  log?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+): Promise<BuiltinScriptResponse> {
   const failures: string[] = [];
   for (const targetDir of targetDirs) {
+    if (signal?.aborted) {
+      return {
+        success: false,
+        message: `${successLabel} cancelled.`,
+      };
+    }
     const relativeDir = path.relative(projectRoot, targetDir);
     const label = relativeDir === "" ? "." : relativeDir.split(path.sep).join("/");
+    log?.(`[cmd] ${label} :: ${command.join(" ")}`);
     process.stdout.write(`Running in ${label}: ${command.join(" ")}\n`);
-    const result = spawnSync(command[0], command.slice(1), {
-      cwd: targetDir,
-      encoding: "utf8",
-      shell: false,
-    });
-    if (result.stdout?.trim()) {
+    const result = await spawnCommand(targetDir, command, signal, outputMode);
+    if (result.stdout.trim()) {
       process.stdout.write(result.stdout.trimEnd() + "\n");
     }
-    if (result.stderr?.trim()) {
+    if (result.stderr.trim()) {
       process.stderr.write(result.stderr.trimEnd() + "\n");
+    }
+    if (result.cancelled) {
+      return {
+        success: false,
+        message: `${successLabel} cancelled.`,
+      };
     }
     if (result.status !== 0) {
       failures.push(label);
@@ -120,6 +203,77 @@ function runCommandAcrossDirs(
     success: true,
     message: `${successLabel} completed in ${targetDirs.length} location(s).`,
   };
+}
+
+async function spawnCommand(
+  cwd: string,
+  command: string[],
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+): Promise<{ status: number | null; stdout: string; stderr: string; cancelled: boolean }> {
+  return await new Promise((resolve, reject) => {
+    const shouldCaptureOutput = outputMode === "capture";
+    const child = spawn(command[0], command.slice(1), {
+      cwd,
+      shell: false,
+      stdio: shouldCaptureOutput ? ["ignore", "pipe", "pipe"] : ["ignore", "inherit", "inherit"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let cancelled = false;
+    let settled = false;
+
+    const finalize = (value: { status: number | null; stdout: string; stderr: string; cancelled: boolean }) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const fail = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const onAbort = () => {
+      cancelled = true;
+      try {
+        child.kill("SIGINT");
+      } catch {
+        // Ignore kill races if the child already exited.
+      }
+    };
+
+    const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (shouldCaptureOutput) {
+      child.stdout?.on("data", (chunk: Buffer | string) => {
+        stdout += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      });
+      child.stderr?.on("data", (chunk: Buffer | string) => {
+        stderr += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      });
+    }
+    child.on("error", fail);
+    child.on("close", (code, childSignal) => {
+      finalize({
+        status: code,
+        stdout,
+        stderr,
+        cancelled: cancelled || childSignal === "SIGINT",
+      });
+    });
+  });
 }
 
 function walkProjectTree(root: string, visitor: (currentDir: string, filenames: string[]) => void): void {

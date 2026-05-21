@@ -1,8 +1,0 @@
-id = "maven_dependency_update_minor"
-name = "Maven dependency update (minor)"
-description = "Run mvn versions:use-latest-releases without major updates for all pom.xml locations inside the selected project."
-project_types = ["maven"]
-entry = "mavenDependencyUpdate"
-
-[default_args]
-allow_major_updates = false

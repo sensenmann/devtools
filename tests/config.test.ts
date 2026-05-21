@@ -18,6 +18,14 @@ project_types = ["maven", "node"]
 
 [scripts]
 directory = "scripts"
+
+[tui]
+width = 120
+project_rows = 22
+summary_rows = 8
+project_sort = "modified"
+favorites_file = ".favorites.json"
+script_state_file = ".script-state.json"
 `.trim(),
     "utf8",
   );
@@ -26,4 +34,10 @@ directory = "scripts"
   assert.equal(config.scripts.directory, path.resolve(root, "scripts"));
   assert.equal(config.discovery.cacheFile, path.resolve(root, ".devtools-project-cache.json"));
   assert.deepEqual(config.discovery.projectTypes, ["maven", "node"]);
+  assert.equal(config.tui.width, 120);
+  assert.equal(config.tui.projectRows, 22);
+  assert.equal(config.tui.summaryRows, 8);
+  assert.equal(config.tui.projectSort, "modified");
+  assert.equal(config.tui.favoritesFile, path.resolve(root, ".favorites.json"));
+  assert.equal(config.tui.scriptStateFile, path.resolve(root, ".script-state.json"));
 });

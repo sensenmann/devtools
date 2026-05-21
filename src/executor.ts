@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { BUILTIN_SCRIPT_MODULES } from "./script-modules.ts";
-import type { AppConfig, ExecutionResult, Project, ScriptContext, ScriptDefinition } from "./models.ts";
+import type { AppConfig, ExecutionResult, Project, RunOutputMode, ScriptContext, ScriptDefinition } from "./models.ts";
 
 export async function runScriptForProjects(
   config: AppConfig,
@@ -9,11 +9,30 @@ export async function runScriptForProjects(
   projects: Project[],
   cliArgs: Record<string, unknown> = {},
   eventCallback?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: RunOutputMode = "capture",
 ): Promise<ExecutionResult[]> {
   const results: ExecutionResult[] = [];
   for (const project of projects) {
+    if (signal?.aborted) {
+      eventCallback?.("[cancelled] Script execution interrupted.");
+      break;
+    }
+    if (!supportsScript(script, project)) {
+      const result: ExecutionResult = {
+        project,
+        script,
+        success: true,
+        message: `Skipped: ${script.scriptId} does not apply to [${project.projectTypes.join(",")}].`,
+        output: "",
+        error: "",
+      };
+      results.push(result);
+      eventCallback?.(`[skip] ${project.path} :: ${result.message}`);
+      continue;
+    }
     eventCallback?.(`[start] ${script.scriptId} -> ${project.path}`);
-    const result = await runScriptForProject(config, script, project, cliArgs);
+    const result = await runScriptForProject(config, script, project, cliArgs, eventCallback, signal, outputMode);
     results.push(result);
     const prefix = result.success ? "ok" : "fail";
     const detail = result.message || result.error;
@@ -27,6 +46,9 @@ export async function runScriptForProject(
   script: ScriptDefinition,
   project: Project,
   cliArgs: Record<string, unknown> = {},
+  eventCallback?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: RunOutputMode = "capture",
 ): Promise<ExecutionResult> {
   const args = { ...script.defaultArgs, ...cliArgs };
   const context: ScriptContext = {
@@ -35,10 +57,14 @@ export async function runScriptForProject(
     project,
     args,
     runId: randomUUID().replaceAll("-", ""),
+    log: eventCallback,
+    signal,
+    outputMode,
   };
 
   let stdoutBuffer = "";
   let stderrBuffer = "";
+  const shouldCaptureOutput = outputMode === "capture";
   const originalStdoutWrite = process.stdout.write.bind(process.stdout);
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
 
@@ -52,9 +78,21 @@ export async function runScriptForProject(
   };
 
   try {
+    if (signal?.aborted) {
+      return {
+        project,
+        script,
+        success: false,
+        message: "Execution cancelled before start.",
+        output: "",
+        error: "",
+      };
+    }
     const runner = loadEntry(script);
-    process.stdout.write = interceptStdout as typeof process.stdout.write;
-    process.stderr.write = interceptStderr as typeof process.stderr.write;
+    if (shouldCaptureOutput) {
+      process.stdout.write = interceptStdout as typeof process.stdout.write;
+      process.stderr.write = interceptStderr as typeof process.stderr.write;
+    }
     const response = await runner(context);
     return {
       project,
@@ -74,8 +112,10 @@ export async function runScriptForProject(
       error: `${stderrBuffer}${error instanceof Error ? error.message : String(error)}`,
     };
   } finally {
-    process.stdout.write = originalStdoutWrite;
-    process.stderr.write = originalStderrWrite;
+    if (shouldCaptureOutput) {
+      process.stdout.write = originalStdoutWrite;
+      process.stderr.write = originalStderrWrite;
+    }
   }
 }
 
@@ -85,4 +125,8 @@ function loadEntry(script: ScriptDefinition) {
     throw new Error(`Unknown script entry for ${script.scriptId}: ${script.entry}`);
   }
   return runner;
+}
+
+function supportsScript(script: ScriptDefinition, project: Project): boolean {
+  return script.projectTypes.some((projectType) => project.projectTypes.includes(projectType));
 }

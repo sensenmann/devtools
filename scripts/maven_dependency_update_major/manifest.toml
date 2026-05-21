@@ -1,8 +1,0 @@
-id = "maven_dependency_update_major"
-name = "Maven dependency update (major)"
-description = "Run mvn versions:use-latest-releases with major updates allowed for all pom.xml locations inside the selected project."
-project_types = ["maven"]
-entry = "mavenDependencyUpdate"
-
-[default_args]
-allow_major_updates = true

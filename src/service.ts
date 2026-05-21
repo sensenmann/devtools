@@ -1,8 +1,8 @@
 import { loadConfig } from "./config.ts";
 import { discoverExplicitProjects, discoverProjects, filterProjects } from "./discovery.ts";
 import { runScriptForProjects } from "./executor.ts";
-import { getScriptById, loadScripts, applicableScripts } from "./registry.ts";
-import type { AppConfig, ExecutionResult, Project, ScriptDefinition } from "./models.ts";
+import { applicableScripts, buildScriptEntries, expandScriptEntry, getScriptEntryById, loadScripts } from "./registry.ts";
+import type { AppConfig, ExecutionResult, Project, RunOutputMode, ScriptDefinition, ScriptEntry } from "./models.ts";
 
 export class DevtoolsService {
   readonly config: AppConfig;
@@ -32,9 +32,9 @@ export class DevtoolsService {
     return discoverProjects(this.config, undefined, true);
   }
 
-  listScripts(projects?: Project[]): ScriptDefinition[] {
+  listScripts(projects?: Project[]): ScriptEntry[] {
     const scripts = loadScripts(this.config);
-    return projects ? applicableScripts(scripts, projects) : scripts;
+    return buildScriptEntries(projects ? applicableScripts(scripts, projects) : scripts);
   }
 
   async runScript(
@@ -42,12 +42,22 @@ export class DevtoolsService {
     projects: Project[],
     cliArgs: Record<string, unknown> = {},
     eventCallback?: (message: string) => void,
+    signal?: AbortSignal,
+    outputMode: RunOutputMode = "capture",
+    scriptArgOverrides?: Record<string, Record<string, unknown>>,
   ): Promise<ExecutionResult[]> {
     const scripts = loadScripts(this.config);
-    const script = getScriptById(scripts, scriptId);
-    if (!script) {
+    const entry = getScriptEntryById(scripts, scriptId);
+    if (!entry) {
       throw new Error(`Unknown script id: ${scriptId}`);
     }
-    return runScriptForProjects(this.config, script, projects, cliArgs, eventCallback);
+    const runnableScripts = expandScriptEntry(entry, scripts);
+    const results: ExecutionResult[] = [];
+    for (const script of runnableScripts) {
+      eventCallback?.(`[script] ${script.scriptId}`);
+      const effectiveArgs = { ...cliArgs, ...(scriptArgOverrides?.[script.scriptId] ?? {}) };
+      results.push(...await runScriptForProjects(this.config, script, projects, effectiveArgs, eventCallback, signal, outputMode));
+    }
+    return results;
   }
 }

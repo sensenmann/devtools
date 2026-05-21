@@ -1,0 +1,5 @@
+id = "maven_clean_install"
+name = "🏗️ Maven clean install"
+description = "Run mvn clean install for all pom.xml locations inside the selected project."
+project_types = ["maven"]
+entry = "mavenCleanInstall"

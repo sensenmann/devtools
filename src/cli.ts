@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { DevtoolsService } from "./service.ts";
+import { isScriptGroup } from "./registry.ts";
 import { runTui } from "./tui.ts";
 
 interface ParsedArgs {
@@ -75,7 +76,10 @@ function handleScripts(service: DevtoolsService, args: string[]): number {
       })
     : undefined;
   for (const script of service.listScripts(projects)) {
-    process.stdout.write(`${script.scriptId.padEnd(30)} [${script.projectTypes.join(",")}] ${script.name} - ${script.description}\n`);
+    const indent = isScriptGroup(script) ? "" : script.group ? "  " : "";
+    const label = isScriptGroup(script) ? `[group] ${script.name}` : script.name;
+    const variantSuffix = !isScriptGroup(script) && script.variant ? ` [${script.variant.defaultValue}]` : "";
+    process.stdout.write(`${script.scriptId.padEnd(30)} [${script.projectTypes.join(",")}] ${indent}${label}${variantSuffix} - ${script.description}\n`);
   }
   return 0;
 }

@@ -12,3 +12,22 @@ cache_file = ".devtools-project-cache.json"
 
 [scripts]
 directory = "scripts"
+
+[tui]
+# Optional: cap the TUI width to this many columns.
+# width = 120
+
+# Visible rows in the project/script list.
+project_rows = 10
+
+# Visible summary lines at the bottom.
+summary_rows = 6
+
+# Project ordering: "alphabetical" or "modified" (newest first).
+project_sort = "alphabetical"
+
+# Optional: where TUI favorites are stored.
+# favorites_file = ".devtools-favorites.json"
+
+# Optional: where selected script options are stored.
+# script_state_file = ".devtools-script-state.json"

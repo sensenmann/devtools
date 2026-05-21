@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { AppConfig, Project, ScriptDefinition } from "../src/models.ts";
-import { applicableScripts, loadScripts } from "../src/registry.ts";
+import { applicableScripts, buildScriptEntries, isScriptGroup, loadScripts } from "../src/registry.ts";
 
 function makeConfig(root: string): AppConfig {
   return {
@@ -19,6 +19,13 @@ function makeConfig(root: string): AppConfig {
     },
     scripts: {
       directory: path.join(root, "scripts"),
+    },
+    tui: {
+      favoritesFile: path.join(root, ".favorites.json"),
+      scriptStateFile: path.join(root, ".script-state.json"),
+      projectRows: 10,
+      summaryRows: 6,
+      projectSort: "alphabetical",
     },
   };
 }
@@ -93,4 +100,91 @@ test("registry accepts mixed-capability projects", () => {
     },
   ];
   assert.equal(applicableScripts(scripts, projects).length, 2);
+});
+
+test("registry returns the union of scripts across selected projects", () => {
+  const projects: Project[] = [
+    {
+      name: "fullstack",
+      path: "/tmp/fullstack",
+      projectType: "maven",
+      marker: "pom.xml",
+      projectTypes: ["maven", "node"],
+      identity: "fullstack:/tmp/fullstack",
+    },
+    {
+      name: "backend",
+      path: "/tmp/backend",
+      projectType: "maven",
+      marker: "pom.xml",
+      projectTypes: ["maven"],
+      identity: "backend:/tmp/backend",
+    },
+  ];
+  const scripts: ScriptDefinition[] = [
+    {
+      scriptId: "node",
+      name: "node",
+      description: "",
+      projectTypes: ["node"],
+      entry: "nodeDependencyUpdate",
+      directory: "",
+      manifestPath: "",
+      defaultArgs: {},
+    },
+    {
+      scriptId: "maven",
+      name: "maven",
+      description: "",
+      projectTypes: ["maven"],
+      entry: "mavenDependencyUpdate",
+      directory: "",
+      manifestPath: "",
+      defaultArgs: {},
+    },
+  ];
+  assert.deepEqual(applicableScripts(scripts, projects).map((script) => script.scriptId), ["node", "maven"]);
+});
+
+test("registry builds one-level executable groups before child scripts", () => {
+  const scripts: ScriptDefinition[] = [
+    {
+      scriptId: "node",
+      name: "Node Update",
+      description: "",
+      projectTypes: ["node"],
+      entry: "nodeDependencyUpdate",
+      directory: "",
+      manifestPath: "",
+      defaultArgs: {},
+      group: "Dependency Update",
+    },
+    {
+      scriptId: "maven",
+      name: "Maven Update",
+      description: "",
+      projectTypes: ["maven"],
+      entry: "mavenDependencyUpdate",
+      directory: "",
+      manifestPath: "",
+      defaultArgs: {},
+      group: "Dependency Update",
+    },
+    {
+      scriptId: "git_pull",
+      name: "Git Pull",
+      description: "",
+      projectTypes: ["node"],
+      entry: "gitPull",
+      directory: "",
+      manifestPath: "",
+      defaultArgs: {},
+    },
+  ];
+
+  const entries = buildScriptEntries(scripts);
+  assert.equal(entries.length, 4);
+  assert.equal(entries[0]?.scriptId, "group_dependency_update");
+  assert.equal(isScriptGroup(entries[0]!), true);
+  assert.deepEqual(entries.slice(1).map((entry) => entry.scriptId), ["maven", "node", "git_pull"]);
 });
