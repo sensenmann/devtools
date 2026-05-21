@@ -24,6 +24,10 @@ width = 120
 project_rows = 22
 summary_rows = 8
 project_sort = "modified"
+confirm_run = false
+scripts_percent = 50
+projects_percent = 30
+jobs_percent = 20
 favorites_file = ".favorites.json"
 script_state_file = ".script-state.json"
 scheduled_jobs_file = ".scheduled-jobs.json"
@@ -39,6 +43,10 @@ scheduled_jobs_file = ".scheduled-jobs.json"
   assert.equal(config.tui.projectRows, 22);
   assert.equal(config.tui.summaryRows, 8);
   assert.equal(config.tui.projectSort, "modified");
+  assert.equal(config.tui.confirmRun, false);
+  assert.equal(config.tui.scriptsPercent, 50);
+  assert.equal(config.tui.projectsPercent, 30);
+  assert.equal(config.tui.jobsPercent, 20);
   assert.equal(config.tui.favoritesFile, path.resolve(root, ".favorites.json"));
   assert.equal(config.tui.scriptStateFile, path.resolve(root, ".script-state.json"));
   assert.equal(config.tui.scheduledJobsFile, path.resolve(root, ".scheduled-jobs.json"));

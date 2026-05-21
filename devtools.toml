@@ -17,6 +17,15 @@ directory = "scripts"
 # Optional: cap the TUI width to this many columns.
 # width = 120
 
+# Whether script execution needs a confirmation dialog first.
+# confirm_run = true
+
+# Optional: relative main-pane widths in percent for Scripts / Projects / Jobs.
+# They do not need to add up to exactly 100; the TUI normalizes them.
+scripts_percent = 20
+projects_percent = 30
+jobs_percent = 50
+
 # Visible rows in the project/script list.
 project_rows = 20
 

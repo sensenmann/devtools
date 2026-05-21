@@ -17,12 +17,25 @@ import type {
 } from "./models.ts";
 import { DevtoolsService } from "./service.ts";
 
-type FocusPane = "projects" | "scripts";
-type TuiMode = "main" | "cron-menu" | "cron-script-select" | "cron-schedule-edit" | "cron-job-list" | "cron-job-delete-confirm";
+type FocusPane = "projects" | "scripts" | "jobs";
+type TuiMode = "main" | "run-confirm" | "cron-menu" | "cron-script-select" | "cron-schedule-edit" | "cron-job-list" | "cron-job-delete-confirm";
 type CronMenuOption = "create" | "manage" | "back";
-type CronJobFlowOrigin = "cron-menu" | "cron-job-list";
+type CronJobFlowOrigin = "main" | "cron-menu" | "cron-job-list";
 type ScheduleField = "type" | "weekday" | "hour" | "minute" | "enabled" | "save";
 type DeleteConfirmOption = "yes" | "no";
+type RunConfirmOption = "yes" | "no";
+
+type MainJobEntry =
+  | { kind: "create"; label: string }
+  | { kind: "job"; job: ScheduledJob };
+
+interface JobTableLayout {
+  nameWidth: number;
+  scheduleWidth: number;
+  lastDueWidth: number;
+  nextDueWidth: number;
+  statusWidth: number;
+}
 
 interface ScheduledJobDraft {
   sourceJob?: ScheduledJob;
@@ -63,6 +76,12 @@ interface TuiState {
   cronJobFlowOrigin: CronJobFlowOrigin;
   deleteConfirmCursor: number;
   pendingDeleteJob?: ScheduledJob;
+  deleteConfirmOrigin: "main" | "cron-job-list";
+  runConfirmCursor: number;
+  pendingRun?: {
+    script: ScriptEntry;
+    selectedProjects: Project[];
+  };
 }
 
 export async function runTui(service: DevtoolsService): Promise<void> {
@@ -90,8 +109,10 @@ export async function runTui(service: DevtoolsService): Promise<void> {
     cronScriptScrollOffset: 0,
     cronScheduleFieldCursor: 0,
     scheduledJobs: service.listScheduledJobs(),
-    cronJobFlowOrigin: "cron-menu",
+    cronJobFlowOrigin: "main",
     deleteConfirmCursor: 1,
+    deleteConfirmOrigin: "main",
+    runConfirmCursor: 1,
   };
   state.logs.push(`Refreshed top-level project cache (${state.projects.length} project(s)).`);
 
@@ -148,6 +169,9 @@ export async function runTui(service: DevtoolsService): Promise<void> {
             return;
           }
           break;
+        case "run-confirm":
+          handleRunConfirmKeypress(service, state, key);
+          break;
         case "cron-menu":
           handleCronMenuKeypress(service, state, input, key);
           break;
@@ -179,32 +203,29 @@ function handleMainKeypress(
   input: string | undefined,
   key: readline.Key,
 ): boolean {
-  if (key.name === "escape" || isJobsKey(input, key)) {
-    state.mode = "cron-menu";
-    state.cronMenuCursor = 0;
-    state.scheduledJobs = service.listScheduledJobs();
-    return false;
-  }
   if (key.name === "left") {
-    if (state.focusPane === "projects") {
-      state.focusPane = "scripts";
-    }
+    state.focusPane = state.focusPane === "jobs" ? "projects" : state.focusPane === "projects" ? "scripts" : "scripts";
     return false;
   }
   if (key.name === "right") {
-    if (state.focusPane === "scripts") {
-      state.focusPane = "projects";
-    }
+    state.focusPane = state.focusPane === "scripts" ? "projects" : state.focusPane === "projects" ? "jobs" : "jobs";
     return false;
   }
   if (isCommandKey(key, "r")) {
     state.projects = service.refreshProjects();
+    state.scheduledJobs = service.listScheduledJobs();
     state.logs.push(`Refreshed top-level project cache (${state.projects.length} project(s)).`);
     return false;
   }
   const scripts = getScripts(service, state);
+  state.scriptCursor = Math.min(state.scriptCursor, Math.max(0, scripts.length - 1));
+  state.scriptScrollOffset = clampScrollOffset(state.scriptCursor, state.scriptScrollOffset, scripts.length, Math.max(1, service.config.tui.projectRows));
   if (state.focusPane === "projects") {
     handleProjectInput(service, state, input, key, service.config.tui.projectSort, scripts);
+    return false;
+  }
+  if (state.focusPane === "jobs") {
+    handleMainJobsInput(service, state, input, key);
     return false;
   }
   const pageSize = Math.max(1, service.config.tui.projectRows);
@@ -247,7 +268,7 @@ function handleMainKeypress(
     return false;
   }
   if (key.name === "return") {
-    void runSelectedScript(service, state, scripts);
+    requestRunConfirmation(service, state, scripts);
   }
   return false;
 }
@@ -279,7 +300,11 @@ function handleProjectInput(
     state.projectCursor = Math.min(Math.max(0, filteredProjects.length - 1), state.projectCursor + pageSize);
     return;
   }
-  if (key.name === "return" || input === " ") {
+  if (key.name === "return") {
+    requestRunConfirmation(service, state, scripts);
+    return;
+  }
+  if (input === " ") {
     const current = filteredProjects[state.projectCursor];
     if (!current) {
       return;
@@ -289,6 +314,7 @@ function handleProjectInput(
     } else {
       state.selectedProjectIds = [...state.selectedProjectIds, current.identity];
     }
+    state.projectCursor = Math.min(filteredProjects.length - 1, state.projectCursor + 1);
     return;
   }
   if (isCommandKey(key, "f")) {
@@ -311,6 +337,107 @@ function handleProjectInput(
   if (typeof input === "string" && input.length === 1 && !key.ctrl && !key.meta && !isControlCharacter(input)) {
     state.projectFilter += input;
     state.projectCursor = 0;
+  }
+}
+
+function handleMainJobsInput(
+  service: DevtoolsService,
+  state: TuiState,
+  input: string | undefined,
+  key: readline.Key,
+): void {
+  const jobs = getMainJobEntries(state);
+  const pageSize = Math.max(1, service.config.tui.projectRows);
+  if (key.name === "up") {
+    state.cronJobCursor = Math.max(0, state.cronJobCursor - 1);
+    return;
+  }
+  if (key.name === "down") {
+    state.cronJobCursor = Math.min(Math.max(0, jobs.length - 1), state.cronJobCursor + 1);
+    return;
+  }
+  if (key.name === "pageup") {
+    state.cronJobCursor = Math.max(0, state.cronJobCursor - pageSize);
+    return;
+  }
+  if (key.name === "pagedown") {
+    state.cronJobCursor = Math.min(Math.max(0, jobs.length - 1), state.cronJobCursor + pageSize);
+    return;
+  }
+  const current = jobs[state.cronJobCursor];
+  if (!current) {
+    return;
+  }
+  if (key.name === "return") {
+    if (current.kind === "create") {
+      openCreateScheduledJob(state);
+      return;
+    }
+    openEditScheduledJob(state, current.job);
+    return;
+  }
+  if (isCommandKey(key, "c") || input === "c" || input === "C") {
+    openCreateScheduledJob(state);
+    return;
+  }
+  if (key.name === "space" && current.kind === "job") {
+    current.job.enabled = !current.job.enabled;
+    service.saveScheduledJob(current.job);
+    state.scheduledJobs = service.listScheduledJobs();
+    return;
+  }
+  if (isCommandKey(key, "e") || input === "e" || input === "E") {
+    if (current.kind === "create") {
+      openCreateScheduledJob(state);
+      return;
+    }
+    openEditScheduledJob(state, current.job);
+    return;
+  }
+  if ((isCommandKey(key, "d") || input === "d" || input === "D") && current.kind === "job") {
+    state.pendingDeleteJob = current.job;
+    state.deleteConfirmCursor = 1;
+    state.deleteConfirmOrigin = "main";
+    state.mode = "cron-job-delete-confirm";
+  }
+}
+
+function handleRunConfirmKeypress(
+  service: DevtoolsService,
+  state: TuiState,
+  key: readline.Key,
+): void {
+  const pendingRun = state.pendingRun;
+  if (!pendingRun) {
+    state.mode = "main";
+    return;
+  }
+  const options: RunConfirmOption[] = ["yes", "no"];
+  if (key.name === "escape") {
+    state.pendingRun = undefined;
+    state.runConfirmCursor = 1;
+    state.mode = "main";
+    return;
+  }
+  if (key.name === "left" || key.name === "up") {
+    state.runConfirmCursor = Math.max(0, state.runConfirmCursor - 1);
+    return;
+  }
+  if (key.name === "right" || key.name === "down") {
+    state.runConfirmCursor = Math.min(options.length - 1, state.runConfirmCursor + 1);
+    return;
+  }
+  if (key.name !== "return") {
+    return;
+  }
+  const selectedOption = options[state.runConfirmCursor];
+  const runRequest = pendingRun;
+  state.pendingRun = undefined;
+  state.runConfirmCursor = 1;
+  state.mode = "main";
+  if (selectedOption === "yes") {
+    const scripts = getScripts(service, state);
+    void runSelectedScript(service, state, scripts, runRequest.script, runRequest.selectedProjects);
   }
 }
 
@@ -466,7 +593,7 @@ function handleCronScheduleEditKeypress(
     const savedJob = saveScheduledJobDraft(service, draft);
     state.scheduledJobs = service.listScheduledJobs();
     state.logs = [`Saved scheduled job: ${savedJob.name}`];
-    state.mode = "cron-job-list";
+    state.mode = state.cronJobFlowOrigin === "main" ? "main" : "cron-job-list";
     state.cronJobCursor = Math.max(0, state.scheduledJobs.findIndex((job) => job.jobId === savedJob.jobId));
     state.cronJobScrollOffset = 0;
     state.jobDraft = undefined;
@@ -505,6 +632,7 @@ function handleCronJobListKeypress(
   if (key.name === "backspace" || key.name === "delete") {
     state.pendingDeleteJob = current;
     state.deleteConfirmCursor = 1;
+    state.deleteConfirmOrigin = "cron-job-list";
     state.mode = "cron-job-delete-confirm";
     return;
   }
@@ -539,7 +667,7 @@ function handleCronJobDeleteConfirmKeypress(
   if (key.name === "escape" || isJobsKey(input, key)) {
     state.pendingDeleteJob = undefined;
     state.deleteConfirmCursor = 1;
-    state.mode = "cron-job-list";
+    state.mode = state.deleteConfirmOrigin;
     return;
   }
   if (key.name === "left" || key.name === "up") {
@@ -563,13 +691,16 @@ function handleCronJobDeleteConfirmKeypress(
   }
   state.pendingDeleteJob = undefined;
   state.deleteConfirmCursor = 1;
-  state.mode = "cron-job-list";
+  state.mode = state.deleteConfirmOrigin;
 }
 
 function renderFrame(service: DevtoolsService, state: TuiState): void {
   switch (state.mode) {
     case "main":
       renderMainFrame(service, state);
+      return;
+    case "run-confirm":
+      renderRunConfirmFrame(service, state);
       return;
     case "cron-menu":
       renderCronMenuFrame(service, state);
@@ -594,44 +725,66 @@ function renderMainFrame(service: DevtoolsService, state: TuiState): void {
   const configuredWidth = service.config.tui.width;
   const width = Math.max(60, configuredWidth ? Math.min(columns, configuredWidth) : Math.max(100, columns));
   const innerWidth = width - 2;
-  const gutter = 3;
-  const leftWidth = Math.floor((innerWidth - gutter) * 0.56);
-  const rightWidth = innerWidth - gutter - leftWidth;
+  const paneGap = "   ";
+  const jobSeparator = color(" │ ", "gray");
+  const contentWidth = innerWidth - stripAnsi(paneGap).length - stripAnsi(jobSeparator).length;
+  const paneWidths = resolveMainPaneWidths(
+    contentWidth,
+    service.config.tui.scriptsPercent,
+    service.config.tui.projectsPercent,
+    service.config.tui.jobsPercent,
+  );
+  const scriptsWidth = paneWidths.scripts;
+  const projectsWidth = paneWidths.projects;
+  const jobsWidth = paneWidths.jobs;
   const scripts = getScripts(service, state);
+  const jobs = getMainJobEntries(state);
+  const rowCount = service.config.tui.projectRows;
+  state.scriptCursor = Math.min(state.scriptCursor, Math.max(0, scripts.length - 1));
+  state.cronJobCursor = Math.min(state.cronJobCursor, Math.max(0, jobs.length - 1));
+  state.scriptScrollOffset = clampScrollOffset(state.scriptCursor, state.scriptScrollOffset, scripts.length, rowCount);
+  state.cronJobScrollOffset = clampScrollOffset(state.cronJobCursor, state.cronJobScrollOffset, jobs.length, rowCount);
   const selectedScript = scripts[state.scriptCursor];
   const filteredProjects = getFilteredProjectsForScript(service, state, service.config.tui.projectSort, selectedScript);
-  const rowCount = service.config.tui.projectRows;
   state.projectCursor = Math.min(state.projectCursor, Math.max(0, filteredProjects.length - 1));
-  state.scriptCursor = Math.min(state.scriptCursor, Math.max(0, scripts.length - 1));
   state.projectScrollOffset = clampScrollOffset(state.projectCursor, state.projectScrollOffset, filteredProjects.length, rowCount);
-  state.scriptScrollOffset = clampScrollOffset(state.scriptCursor, state.scriptScrollOffset, scripts.length, rowCount);
   const visibleProjects = filteredProjects.slice(state.projectScrollOffset, state.projectScrollOffset + rowCount);
   const visibleScripts = scripts.slice(state.scriptScrollOffset, state.scriptScrollOffset + rowCount);
+  const visibleJobs = jobs.slice(state.cronJobScrollOffset, state.cronJobScrollOffset + rowCount);
+  const jobTableLayout = buildJobTableLayout(visibleJobs, new Date(), jobsWidth);
   const activeProjectRow = state.projectCursor - state.projectScrollOffset;
   const activeScriptRow = state.scriptCursor - state.scriptScrollOffset;
+  const activeJobRow = state.cronJobCursor - state.cronJobScrollOffset;
   const showGlobalProjectsHint = !!selectedScript && !isScriptGroup(selectedScript) && selectedScript.scope === "global";
 
   const lines: string[] = [];
   lines.push(drawHorizontal("top", width));
   lines.push(drawLine(` ${color("devtools", "cyan")}  focus: ${state.focusPane} `, width));
-  lines.push(drawLine(` ${color("keys:", "yellow")} ${renderMainKeyHelp()} `, width));
+  lines.push(drawLine(` ${color("keys:", "yellow")} ${renderMainKeyHelp(state.focusPane)} `, width));
   lines.push(drawHorizontal("divider", width));
   lines.push(drawLine(
-    `${pad(formatPaneTitle("Scripts", state.scriptFilter), leftWidth)}${" ".repeat(gutter)}${pad(formatPaneTitle("Projects", state.projectFilter), rightWidth)}`,
+    `${pad(formatPaneTitle("Scripts", state.scriptFilter), scriptsWidth)}${paneGap}${pad(formatPaneTitle("Projects", state.projectFilter), projectsWidth)}${jobSeparator}${pad(color("Jobs", "cyan"), jobsWidth)}`,
+    width,
+  ));
+  lines.push(drawHorizontal("divider", width));
+  lines.push(drawLine(
+    `${pad("", scriptsWidth)}${paneGap}${pad("", projectsWidth)}${jobSeparator}${pad(formatJobTableHeader(jobTableLayout), jobsWidth)}`,
     width,
   ));
   lines.push(drawHorizontal("divider", width));
   for (let index = 0; index < rowCount; index += 1) {
     const script = visibleScripts[index];
     const project = visibleProjects[index];
+    const job = visibleJobs[index];
     const scriptText = script ? formatScriptEntry(script, state.selectedVariants, state.favoriteScriptIds) : "";
     const projectText = project
       ? `${state.selectedProjectIds.includes(project.identity) ? "[x]" : "[ ]"} ${state.favoriteProjectPaths.includes(project.path) ? "⭐️ " : ""}${project.name} [${project.projectTypes.join(",")}]`
       : showGlobalProjectsHint && index === 0
         ? color("<Globales Script>", "gray")
         : "";
+    const jobText = job ? formatMainJobEntry(job, new Date(), jobTableLayout) : "";
     lines.push(drawLine(
-      `${highlight(scriptText, pad(scriptText, leftWidth), state.focusPane === "scripts" && index === activeScriptRow)}${" ".repeat(gutter)}${highlight(projectText, pad(projectText, rightWidth), state.focusPane === "projects" && index === activeProjectRow)}`,
+      `${highlightWithSelectionState(scriptText, pad(scriptText, scriptsWidth), state.focusPane === "scripts" && index === activeScriptRow, state.focusPane !== "scripts" && index === activeScriptRow)}${paneGap}${highlightWithSelectionState(projectText, pad(projectText, projectsWidth), state.focusPane === "projects" && index === activeProjectRow, Boolean(project) && state.selectedProjectIds.includes(project.identity) && !(state.focusPane === "projects" && index === activeProjectRow))}${jobSeparator}${highlight(jobText, pad(jobText, jobsWidth), state.focusPane === "jobs" && index === activeJobRow)}`,
       width,
     ));
   }
@@ -641,6 +794,55 @@ function renderMainFrame(service: DevtoolsService, state: TuiState): void {
   }
   lines.push(drawHorizontal("bottom", width));
   process.stdout.write(`\x1b[2J\x1b[H${lines.join("\n")}`);
+}
+
+function resolveMainPaneWidths(
+  availableWidth: number,
+  scriptsPercent = 42,
+  projectsPercent = 28,
+  jobsPercent = 30,
+): { scripts: number; projects: number; jobs: number } {
+  const safeAvailable = Math.max(24, availableWidth);
+  const total = Math.max(1, scriptsPercent + projectsPercent + jobsPercent);
+  const scripts = Math.max(12, Math.floor(safeAvailable * (scriptsPercent / total)));
+  const projects = Math.max(12, Math.floor(safeAvailable * (projectsPercent / total)));
+  const jobs = Math.max(12, safeAvailable - scripts - projects);
+
+  if (scripts + projects + jobs === safeAvailable) {
+    return { scripts, projects, jobs };
+  }
+
+  const adjustedJobs = Math.max(12, safeAvailable - scripts - projects);
+  const adjustedProjects = Math.max(12, safeAvailable - scripts - adjustedJobs);
+  return {
+    scripts: Math.max(12, safeAvailable - adjustedProjects - adjustedJobs),
+    projects: adjustedProjects,
+    jobs: adjustedJobs,
+  };
+}
+
+function renderRunConfirmFrame(service: DevtoolsService, state: TuiState): void {
+  const pendingRun = state.pendingRun;
+  if (!pendingRun) {
+    renderMainFrame(service, state);
+    return;
+  }
+  const options: Array<{ label: string; key: RunConfirmOption }> = [
+    { label: "Yes", key: "yes" },
+    { label: "No", key: "no" },
+  ];
+  const projectCount = pendingRun.selectedProjects.length;
+  const scopeText = !isScriptGroup(pendingRun.script) && pendingRun.script.scope === "global"
+    ? color("0", "cyan")
+    : color(String(projectCount), "cyan");
+  renderSimpleMenu(
+    service,
+    "Confirm Run",
+    `Executing ${color(pendingRun.script.name, "yellow")} on ${scopeText} project(s)?`,
+    options.map((option) => option.label),
+    state.runConfirmCursor,
+    ` ${color("keys:", "yellow")} ${formatKeybinding(["Enter"], "confirm")}  ${formatKeybinding(["←/→"], "choose")}  ${formatKeybinding(["Esc"], "cancel")} `,
+  );
 }
 
 function renderCronMenuFrame(service: DevtoolsService, state: TuiState): void {
@@ -924,6 +1126,15 @@ function getSelectedProjects(state: Pick<TuiState, "projects" | "selectedProject
   return state.projects.filter((project) => state.selectedProjectIds.includes(project.identity));
 }
 
+function getMainJobEntries(state: Pick<TuiState, "projects" | "selectedProjectIds" | "scheduledJobs">): MainJobEntry[] {
+  const entries: MainJobEntry[] = [];
+  if (getSelectedProjects(state).length > 0) {
+    entries.push({ kind: "create", label: "+ Create from current selection" });
+  }
+  entries.push(...state.scheduledJobs.map((job) => ({ kind: "job", job })));
+  return entries;
+}
+
 function getScripts(
   service: DevtoolsService,
   state: Pick<TuiState, "favoriteScriptIds" | "scriptFilter">,
@@ -997,6 +1208,64 @@ function replaceSummaryLogs(results: ExecutionResult[], logs: string[]): void {
   logs.push(`Finished with ${failures} failure(s).`);
 }
 
+function requestRunConfirmation(
+  service: DevtoolsService,
+  state: TuiState,
+  scripts: ScriptEntry[],
+): void {
+  const selectedProjects = getSelectedProjects(state);
+  const selectedScript = scripts[state.scriptCursor];
+  const isGlobalScript = !selectedScript || isScriptGroup(selectedScript) ? false : selectedScript.scope === "global";
+  if (!selectedScript || (!isGlobalScript && selectedProjects.length === 0)) {
+    state.logs.push(isGlobalScript ? "Select a script." : "Select at least one project and one script.");
+    return;
+  }
+  if (!service.config.tui.confirmRun) {
+    void runSelectedScript(service, state, scripts, selectedScript, selectedProjects);
+    return;
+  }
+  state.pendingRun = {
+    script: selectedScript,
+    selectedProjects,
+  };
+  state.runConfirmCursor = 1;
+  state.mode = "run-confirm";
+}
+
+function openCreateScheduledJob(state: TuiState): void {
+  const selectedProjects = getSelectedProjects(state);
+  if (selectedProjects.length === 0) {
+    state.logs.push("Select at least one project before creating a scheduled job.");
+    return;
+  }
+  state.jobDraft = {
+    projectPaths: selectedProjects.map((project) => project.path),
+    selectedScriptIds: [],
+    selectedVariants: { ...state.selectedVariants },
+    schedule: { kind: "hourly" },
+    enabled: true,
+  };
+  state.cronJobFlowOrigin = "main";
+  state.cronScriptCursor = 0;
+  state.cronScriptScrollOffset = 0;
+  state.mode = "cron-script-select";
+}
+
+function openEditScheduledJob(state: TuiState, job: ScheduledJob): void {
+  state.jobDraft = {
+    sourceJob: job,
+    projectPaths: [...job.projectPaths],
+    selectedScriptIds: [...job.selectedScriptIds],
+    selectedVariants: { ...job.selectedVariants },
+    schedule: cloneSchedule(job.schedule),
+    enabled: job.enabled,
+  };
+  state.cronJobFlowOrigin = "main";
+  state.cronScriptCursor = 0;
+  state.cronScriptScrollOffset = 0;
+  state.mode = "cron-script-select";
+}
+
 function waitForResume(state: Pick<TuiState, "awaitingResume" | "resumeResolver">): Promise<void> {
   state.awaitingResume = true;
   return new Promise<void>((resolve) => {
@@ -1050,6 +1319,16 @@ function highlight(original: string, padded: string, active: boolean): string {
   return `\x1b[30;103m${padded}\x1b[0m`;
 }
 
+function highlightWithSelectionState(original: string, padded: string, active: boolean, selected: boolean): string {
+  if (active) {
+    return highlight(original, padded, true);
+  }
+  if (!selected || !original) {
+    return padded;
+  }
+  return `\x1b[30;47m${padded}\x1b[0m`;
+}
+
 function highlightInput(value: string): string {
   if (value.length === 0) {
     return " ";
@@ -1087,15 +1366,30 @@ function stripAnsi(value: string): string {
   return value.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-function renderMainKeyHelp(): string {
-  const segments = [
-    renderWordShortcut("Select All", "A"),
-    renderWordShortcut("Favorite", "F"),
-    renderWordShortcut("Reload project list", "R"),
-    renderWordShortcut("Jobs", "J"),
-    renderWordShortcut("Quit", "Q"),
-  ];
+function renderMainKeyHelp(focusPane: FocusPane): string {
+  const segments = ["←/→: pane", renderWordShortcut("Reload project list", "R")];
+  if (focusPane === "scripts") {
+    segments.unshift(renderWordShortcut("Favorite", "F"));
+    segments.push("Tab: option", "Enter: run");
+  } else if (focusPane === "projects") {
+    segments.unshift(renderWordShortcut("Select All", "A"), renderWordShortcut("Favorite", "F"));
+    segments.push("Space: toggle", "Enter: run");
+  } else {
+    segments.unshift(renderWordShortcut("Create Job", "C"));
+    segments.push(renderWordShortcut("Edit Job", "E"), renderWordShortcut("Delete Job", "D"), "Space: toggle enabled");
+  }
+  segments.push(renderWordShortcut("Quit", "Q"));
   return segments.join(color(" | ", "yellow"));
+}
+
+function formatMainJobEntry(entry: MainJobEntry, now: Date, layout: JobTableLayout): string {
+  if (entry.kind === "create") {
+    return formatJobTableCells(
+      [color(entry.label, "cyan"), "", "", "", ""],
+      layout,
+    );
+  }
+  return formatScheduledJobTableRow(entry.job, now, layout);
 }
 
 function formatScriptEntry(
@@ -1169,9 +1463,15 @@ function buildScriptArgOverrides(
   return overrides;
 }
 
-async function runSelectedScript(service: DevtoolsService, state: TuiState, scripts: ScriptEntry[]): Promise<void> {
-  const selectedProjects = getSelectedProjects(state);
-  const selectedScript = scripts[state.scriptCursor];
+async function runSelectedScript(
+  service: DevtoolsService,
+  state: TuiState,
+  scripts: ScriptEntry[],
+  selectedScriptOverride?: ScriptEntry,
+  selectedProjectsOverride?: Project[],
+): Promise<void> {
+  const selectedProjects = selectedProjectsOverride ?? getSelectedProjects(state);
+  const selectedScript = selectedScriptOverride ?? scripts[state.scriptCursor];
   const isGlobalScript = !selectedScript || isScriptGroup(selectedScript) ? false : selectedScript.scope === "global";
   if (!selectedScript || (!isGlobalScript && selectedProjects.length === 0)) {
     state.logs.push(isGlobalScript ? "Select a script." : "Select at least one project and one script.");
@@ -1340,6 +1640,110 @@ function formatScheduledJob(job: ScheduledJob, now: Date): string {
   const lastDue = formatShortDateTime(getLatestDueTime(job.schedule, now));
   const nextDue = formatShortDateTime(getNextDueTime(job.schedule, now));
   return `${job.name} [${status}] | last due ${lastDue} | next due ${nextDue}${lastRun}`;
+}
+
+function formatScheduledJobTableRow(job: ScheduledJob, now: Date, layout: JobTableLayout): string {
+  const schedule = formatScheduleSummary(job.schedule);
+  const lastDue = formatShortDateTime(getLatestDueTime(job.schedule, now));
+  const nextDue = formatShortDateTime(getNextDueTime(job.schedule, now));
+  const status = job.lastRunStatus ?? (job.enabled ? "enabled" : "disabled");
+
+  return formatJobTableCells(
+    [
+      `${job.enabled ? "[x]" : "[ ]"} ${job.name}`,
+      schedule,
+      lastDue,
+      nextDue,
+      status,
+    ],
+    layout,
+  );
+}
+
+function formatJobTableHeader(layout: JobTableLayout): string {
+  return color(
+    formatJobTableCells(["Name", "Schedule", "Last due", "Next due", "Status"], layout),
+    "gray",
+  );
+}
+
+function formatJobTableCells(values: [string, string, string, string, string], layout: JobTableLayout): string {
+  return [
+    pad(values[0], layout.nameWidth),
+    pad(values[1], layout.scheduleWidth),
+    pad(values[2], layout.lastDueWidth),
+    pad(values[3], layout.nextDueWidth),
+    pad(values[4], layout.statusWidth),
+  ].join(" | ");
+}
+
+function buildJobTableLayout(entries: MainJobEntry[], now: Date, totalWidth: number): JobTableLayout {
+  const rows: Array<[string, string, string, string, string]> = [
+    ["Name", "Schedule", "Last due", "Next due", "Status"],
+  ];
+
+  for (const entry of entries) {
+    if (entry.kind === "create") {
+      rows.push([entry.label, "", "", "", ""]);
+      continue;
+    }
+    rows.push([
+      `${entry.job.enabled ? "[x]" : "[ ]"} ${entry.job.name}`,
+      formatScheduleSummary(entry.job.schedule),
+      formatShortDateTime(getLatestDueTime(entry.job.schedule, now)),
+      formatShortDateTime(getNextDueTime(entry.job.schedule, now)),
+      entry.job.lastRunStatus ?? (entry.job.enabled ? "enabled" : "disabled"),
+    ]);
+  }
+
+  const separatorWidth = 12;
+  const maxContentWidth = Math.max(24, totalWidth - separatorWidth);
+  let widths: JobTableLayout = {
+    nameWidth: 10,
+    scheduleWidth: 8,
+    lastDueWidth: 8,
+    nextDueWidth: 8,
+    statusWidth: 7,
+  };
+
+  for (const row of rows) {
+    widths = {
+      nameWidth: Math.max(widths.nameWidth, stripAnsi(row[0]).length),
+      scheduleWidth: Math.max(widths.scheduleWidth, stripAnsi(row[1]).length),
+      lastDueWidth: Math.max(widths.lastDueWidth, stripAnsi(row[2]).length),
+      nextDueWidth: Math.max(widths.nextDueWidth, stripAnsi(row[3]).length),
+      statusWidth: Math.max(widths.statusWidth, stripAnsi(row[4]).length),
+    };
+  }
+
+  let used = widths.nameWidth + widths.scheduleWidth + widths.lastDueWidth + widths.nextDueWidth + widths.statusWidth;
+  if (used <= maxContentWidth) {
+    return widths;
+  }
+
+  const minWidths: JobTableLayout = {
+    nameWidth: 10,
+    scheduleWidth: 8,
+    lastDueWidth: 8,
+    nextDueWidth: 8,
+    statusWidth: 7,
+  };
+  const order: Array<keyof JobTableLayout> = ["nameWidth", "scheduleWidth", "statusWidth", "lastDueWidth", "nextDueWidth"];
+  while (used > maxContentWidth) {
+    let reduced = false;
+    for (const key of order) {
+      if (widths[key] > minWidths[key] && used > maxContentWidth) {
+        widths[key] -= 1;
+        used -= 1;
+        reduced = true;
+      }
+    }
+    if (!reduced) {
+      break;
+    }
+  }
+
+  return widths;
 }
 
 function formatScheduleSummary(schedule: ScheduleDefinition): string {

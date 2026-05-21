@@ -23,6 +23,10 @@ export interface TuiConfig {
   projectRows: number;
   summaryRows: number;
   projectSort: TuiProjectSort;
+  confirmRun: boolean;
+  scriptsPercent?: number;
+  projectsPercent?: number;
+  jobsPercent?: number;
   favoritesFile: string;
   scriptStateFile: string;
   scheduledJobsFile: string;

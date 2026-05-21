@@ -23,6 +23,10 @@ interface RawConfig {
     project_rows?: number;
     summary_rows?: number;
     project_sort?: TuiProjectSort;
+    confirm_run?: boolean;
+    scripts_percent?: number;
+    projects_percent?: number;
+    jobs_percent?: number;
     favorites_file?: string;
     script_state_file?: string;
     scheduled_jobs_file?: string;
@@ -78,9 +82,17 @@ export function loadConfig(configPath?: string, cwd?: string): AppConfig {
       projectRows: typeof tuiRaw.project_rows === "number" && tuiRaw.project_rows > 0 ? tuiRaw.project_rows : 18,
       summaryRows: typeof tuiRaw.summary_rows === "number" && tuiRaw.summary_rows > 0 ? tuiRaw.summary_rows : 6,
       projectSort: tuiRaw.project_sort === "modified" ? "modified" : "alphabetical",
+      confirmRun: tuiRaw.confirm_run !== false,
+      scriptsPercent: normalizePanePercent(tuiRaw.scripts_percent),
+      projectsPercent: normalizePanePercent(tuiRaw.projects_percent),
+      jobsPercent: normalizePanePercent(tuiRaw.jobs_percent),
       favoritesFile,
       scriptStateFile,
       scheduledJobsFile,
     },
   };
+}
+
+function normalizePanePercent(value: unknown): number | undefined {
+  return typeof value === "number" && value > 0 ? value : undefined;
 }
