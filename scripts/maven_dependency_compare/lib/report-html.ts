@@ -25,6 +25,7 @@ export function renderReportPage(): string {
       .badge-pin { background: #fee2e2; color: #991b1b; }
       .badge-provider { background: #fef3c7; color: #92400e; }
       .badge-warn { background: #fef3c7; color: #92400e; }
+      .badge-unused { background: #fee2e2; color: #991b1b; }
       .badge-update { background: #dbeafe; color: #1d4ed8; }
       .kind { display: inline-block; border-radius: 6px; padding: 2px 8px; background: #e2e8f0; color: #334155; font-size: 12px; font-weight: 700; }
       .kind-help { color: #64748b; font-size: .9rem; }
@@ -58,7 +59,7 @@ export function renderReportPage(): string {
             <input class="form-check-input" type="checkbox" id="showOnlyDifferences" />
             <label class="form-check-label" for="showOnlyDifferences">Show only differences</label>
           </div>
-          <div class="form-check">
+          <div class="form-check" id="hideVersionUpdatesControl">
             <input class="form-check-input" type="checkbox" id="hideVersionUpdates" />
             <label class="form-check-label" for="hideVersionUpdates">Hide Version Updates</label>
           </div>
@@ -78,7 +79,7 @@ export function renderReportPage(): string {
         <div class="modal-content">
           <div class="modal-header">
             <h2 class="modal-title fs-5" id="statusModalTitle">Working</h2>
-            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close" id="statusModalHeaderClose"></button>
           </div>
           <div class="modal-body">
             <div class="d-flex align-items-center gap-3" id="statusModalLoading">
@@ -95,10 +96,26 @@ export function renderReportPage(): string {
       </div>
     </div>
 
+    <div class="modal fade" id="overrideTargetsModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h2 class="modal-title fs-5" id="overrideTargetsModalTitle">Override Targets</h2>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div id="overrideTargetsModalMessage" class="text-secondary mb-3"></div>
+            <div id="overrideTargetsModalList" class="list-group list-group-flush"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
       let report = null;
       let statusModal = null;
+      let overrideTargetsModal = null;
       let hiddenProjects = new Set();
 
       async function fetchReport() {
@@ -148,6 +165,7 @@ export function renderReportPage(): string {
       function render() {
         const meta = document.getElementById('meta');
         meta.textContent = 'Generated at ' + report.generatedAt;
+        document.getElementById('hideVersionUpdatesControl').classList.toggle('d-none', report.enableDependencyUpdates === false);
         const app = document.getElementById('app');
         const onlyDifferences = document.getElementById('showOnlyDifferences').checked;
         const hideVersionUpdates = document.getElementById('hideVersionUpdates').checked;
@@ -156,7 +174,7 @@ export function renderReportPage(): string {
           '<th><div class="project-head"><span>' + escapeHtml(project.name) + '</span><button class="remove-project-btn" title="Spalte entfernen" onclick="hideProject(' + escapeAttributeJson(project.path) + ')">×</button></div></th>'
         )).join('');
         const visibleRows = onlyDifferences
-          ? visibleReport.rows.filter((row) => row.cells.some((cell) => cell.isOutdated || cell.isPinnedBelowProvider || cell.isMissingOverrideWarning))
+          ? visibleReport.rows.filter((row) => row.cells.some((cell) => cell.isOutdated || cell.isPinnedBelowProvider || cell.isMissingOverrideWarning || cell.isUnusedOverride))
           : visibleReport.rows;
         const rows = visibleRows.map(renderRow).join('');
         app.innerHTML = '<div class="table-responsive shadow-sm bg-white rounded border"><table class="table table-sm table-hover mb-0"><thead><tr><th class="dep-col">Dependency</th><th class="kind-col">Kind</th>' + head + '<th class="action-col">Actions</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
@@ -171,7 +189,9 @@ export function renderReportPage(): string {
             return '<td><span class="not-used">nicht verwendet</span></td>';
           }
           const classes = [];
-          if (cell.isPinnedBelowProvider) {
+          if (cell.isUnusedOverride) {
+            classes.push('cell-outdated');
+          } else if (cell.isPinnedBelowProvider) {
             classes.push('cell-pinned');
           } else if (cell.isHighest) {
             classes.push('cell-highest');
@@ -180,6 +200,7 @@ export function renderReportPage(): string {
           }
           const badges = [
             cell.hasLocalPropertyOverride ? '<span class="badge badge-prop">property</span>' : '',
+            cell.isUnusedOverride ? '<span class="badge badge-unused">unused</span>' : '',
             cell.showAvailableUpdateVersion && !hideVersionUpdates && cell.availableUpdateVersion
               ? '<span class="badge badge-update">update ' + renderVersionLink(row, cell, cell.availableUpdateVersion) + '</span>'
               : '',
@@ -239,6 +260,7 @@ export function renderReportPage(): string {
                 isHighest,
                 isOutdated,
                 isMissingOverrideWarning: Boolean(row.kind === 'override' && !cell.present),
+                isUnusedOverride: Boolean(cell.isUnusedOverride),
                 adoptHighestAvailable: Boolean(cell.present && highestVersion && effectiveVersion && compareVersionsLite(effectiveVersion, highestVersion) < 0),
                 showAvailableUpdateVersion: Boolean(cell.present && row.availableUpdateVersion),
               };
@@ -307,11 +329,48 @@ export function renderReportPage(): string {
       }
 
       function renderVersionLink(row, cell, version) {
-        if (row.kind === 'override' || !cell.groupId || !cell.artifactId || !version) {
+        if (!version) {
           return escapeHtml(version || '');
         }
-        const href = 'https://mvnrepository.com/artifact/' + encodeURIComponent(cell.groupId) + '/' + encodeURIComponent(cell.artifactId) + '/' + encodeURIComponent(version);
+        if (row.kind === 'override') {
+          const targets = collectOverrideTargets(row);
+          const linkableTargets = targets.filter((target) => Boolean(resolveRepoBaseUrl(target.groupId)));
+          if (linkableTargets.length === 0) {
+            return escapeHtml(version);
+          }
+          if (linkableTargets.length === 1) {
+            const target = linkableTargets[0];
+            const href = buildArtifactVersionUrl(resolveRepoBaseUrl(target.groupId), target.groupId, target.artifactId, version);
+            return '<a class="version-link" href="' + href + '" target="_blank" rel="noreferrer noopener">' + escapeHtml(version) + '</a>';
+          }
+          const payload = encodeInlineJson({
+            label: row.label,
+            version,
+            targets,
+          });
+          return '<a class="version-link" href="#" data-payload="' + escapeHtml(payload) + '" onclick="return openOverrideTargetsModalFromElement(this);">' + escapeHtml(version) + '</a>';
+        }
+        if (!cell.groupId || !cell.artifactId) {
+          return escapeHtml(version || '');
+        }
+        const baseUrl = resolveRepoBaseUrl(cell.groupId);
+        if (!baseUrl) {
+          return escapeHtml(version || '');
+        }
+        const href = buildArtifactVersionUrl(baseUrl, cell.groupId, cell.artifactId, version);
         return '<a class="version-link" href="' + href + '" target="_blank" rel="noreferrer noopener">' + escapeHtml(version) + '</a>';
+      }
+
+      function collectOverrideTargets(row) {
+        const seen = new Set();
+        return row.cells.flatMap((cell) => Array.isArray(cell.overrideTargets) ? cell.overrideTargets : []).filter((target) => {
+          const key = target.groupId + ':' + target.artifactId;
+          if (seen.has(key)) {
+            return false;
+          }
+          seen.add(key);
+          return true;
+        });
       }
 
       function renderDependencyLink(row) {
@@ -322,7 +381,11 @@ export function renderReportPage(): string {
         if (!sourceCell || !sourceCell.groupId || !sourceCell.artifactId) {
           return escapeHtml(row.label);
         }
-        const href = 'https://mvnrepository.com/artifact/' + encodeURIComponent(sourceCell.groupId) + '/' + encodeURIComponent(sourceCell.artifactId);
+        const baseUrl = resolveRepoBaseUrl(sourceCell.groupId);
+        if (!baseUrl) {
+          return escapeHtml(row.label);
+        }
+        const href = buildArtifactUrl(baseUrl, sourceCell.groupId, sourceCell.artifactId);
         return '<a class="dependency-link" href="' + href + '" target="_blank" rel="noreferrer noopener">' + escapeHtml(row.label) + '</a>';
       }
 
@@ -339,6 +402,10 @@ export function renderReportPage(): string {
         return JSON.stringify(String(value)).replace(/"/g, '&quot;');
       }
 
+      function encodeInlineJson(value) {
+        return encodeURIComponent(JSON.stringify(value)).replace(/'/g, '%27');
+      }
+
       function showStatusModal(message, title, loading, mode) {
         document.getElementById('statusModalTitle').textContent = title;
         document.getElementById('statusModalMessage').textContent = message;
@@ -347,10 +414,92 @@ export function renderReportPage(): string {
         document.getElementById('statusModalContinue').classList.toggle('d-none', mode !== 'reload');
         document.getElementById('statusModalClose').classList.toggle('d-none', loading);
         document.getElementById('statusModalClose').classList.toggle('d-none', mode === 'reload');
+        document.getElementById('statusModalHeaderClose').classList.toggle('d-none', loading);
         if (!statusModal) {
-          statusModal = new bootstrap.Modal(document.getElementById('statusModal'));
+          statusModal = new bootstrap.Modal(document.getElementById('statusModal'), {
+            backdrop: 'static',
+            keyboard: false,
+          });
         }
         statusModal.show();
+      }
+
+      function openOverrideTargetsModal(encodedPayload) {
+        const payload = JSON.parse(decodeURIComponent(encodedPayload));
+        document.getElementById('overrideTargetsModalTitle').textContent = payload.label || 'Override Targets';
+        document.getElementById('overrideTargetsModalMessage').textContent = 'Affected packages for version ' + (payload.version || '') + ':';
+        const list = document.getElementById('overrideTargetsModalList');
+        list.innerHTML = (payload.targets || []).map((target) => {
+          const label = escapeHtml(target.groupId + ':' + target.artifactId);
+          const baseUrl = resolveRepoBaseUrl(target.groupId);
+          if (!baseUrl) {
+            return '<div class="list-group-item">' + label + '</div>';
+          }
+          const href = buildArtifactVersionUrl(baseUrl, target.groupId, target.artifactId, payload.version || '');
+          return '<a class="list-group-item list-group-item-action" href="' + href + '" target="_blank" rel="noreferrer noopener">' + label + '</a>';
+        }).join('');
+        if (!overrideTargetsModal) {
+          overrideTargetsModal = new bootstrap.Modal(document.getElementById('overrideTargetsModal'));
+        }
+        overrideTargetsModal.show();
+      }
+
+      function openOverrideTargetsModalFromElement(element) {
+        openOverrideTargetsModal(element.dataset.payload || '');
+        return false;
+      }
+
+      function resolveRepoBaseUrl(groupId) {
+        const overrides = Array.isArray(report?.repoOverrides) ? report.repoOverrides : [];
+        for (const override of overrides) {
+          if (matchesPackagePattern(groupId, String(override?.pattern || ''))) {
+            return normalizeBaseUrl(String(override.baseUrl || ''));
+          }
+        }
+        return normalizeBaseUrl(String(report?.repoDefaultBaseUrl || ''));
+      }
+
+      function matchesPackagePattern(groupId, pattern) {
+        if (!pattern) {
+          return false;
+        }
+        if (!pattern.includes('*')) {
+          return groupId.startsWith(pattern);
+        }
+        const parts = pattern.split('*').filter((part) => part.length > 0);
+        if (parts.length === 0) {
+          return true;
+        }
+        let cursor = 0;
+        for (const [index, part] of parts.entries()) {
+          const foundAt = groupId.indexOf(part, cursor);
+          if (foundAt === -1) {
+            return false;
+          }
+          if (index === 0 && !pattern.startsWith('*') && foundAt !== 0) {
+            return false;
+          }
+          cursor = foundAt + part.length;
+        }
+        if (!pattern.endsWith('*')) {
+          return groupId.endsWith(parts[parts.length - 1]);
+        }
+        return true;
+      }
+
+      function normalizeBaseUrl(baseUrl) {
+        if (!baseUrl) {
+          return '';
+        }
+        return baseUrl.endsWith('/') ? baseUrl : baseUrl + '/';
+      }
+
+      function buildArtifactUrl(baseUrl, groupId, artifactId) {
+        return normalizeBaseUrl(baseUrl) + encodeURIComponent(groupId) + '/' + encodeURIComponent(artifactId);
+      }
+
+      function buildArtifactVersionUrl(baseUrl, groupId, artifactId, version) {
+        return buildArtifactUrl(baseUrl, groupId, artifactId) + '/' + encodeURIComponent(version);
       }
 
       document.getElementById('showOnlyDifferences').addEventListener('change', () => render());

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { buildCompareReport, selectEffectiveProjectRoot } from "../scripts/maven_dependency_compare/lib/pom.ts";
+import { loadCompareConfig } from "../scripts/maven_dependency_compare/config.ts";
 import { parseXmlDocument, serializeXmlDocument } from "../scripts/maven_dependency_compare/lib/xml.ts";
 import { compareVersions } from "../scripts/maven_dependency_compare/lib/version.ts";
 import { renderReportPage } from "../scripts/maven_dependency_compare/lib/report-html.ts";
@@ -21,6 +22,18 @@ test("maven dependency compare serializes simple XML mutations", () => {
   `);
   const serialized = serializeXmlDocument(document);
   assert.match(serialized, /<demo\.version>1\.2\.3<\/demo\.version>/);
+});
+
+test("maven dependency compare config defaults repo urls and override patterns", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-compare-config-"));
+  fs.writeFileSync(path.join(tempDir, "config.toml"), "", "utf8");
+  const config = loadCompareConfig(tempDir);
+  assert.equal(config.defaultRepoBaseUrl, "https://mvnrepository.com/artifact/");
+  assert.equal(config.enableDependencyUpdates, true);
+  assert.deepEqual(config.repoOverrides, [{
+    pattern: "at.gv.brz.*",
+    baseUrl: "https://mvnrepository.com/artifact/",
+  }]);
 });
 
 test("maven dependency compare version ordering prefers higher patch versions", () => {
@@ -324,6 +337,7 @@ test("maven dependency compare sorts override rows before managed and direct row
   assert.deepEqual(report.rows.map((row) => row.kind), ["override", "managed", "direct"]);
   assert.equal(report.rows[0]?.label, "$log4j2.version");
   assert.equal(report.rows[0]?.cells[0]?.removeOverrideAvailable, true);
+  assert.equal(report.rows[0]?.cells[0]?.overrideTargets?.[0]?.artifactId, "log4j-api");
 });
 
 test("maven dependency compare marks missing override properties as warnings in other projects", () => {
@@ -380,6 +394,42 @@ test("maven dependency compare marks missing override properties as warnings in 
   assert.equal(row.cells[1]?.isMissingOverrideWarning, true);
 });
 
+test("maven dependency compare keeps unused version properties as removable override rows", () => {
+  const report = buildCompareReport([
+    {
+      project: {
+        name: "alpha",
+        path: "/tmp/alpha",
+        projectType: "maven",
+        marker: "pom.xml",
+        projectTypes: ["maven"],
+        identity: "alpha:/tmp/alpha",
+      },
+      pomPath: "/tmp/alpha/pom.xml",
+      rows: new Map([
+        ["override:unused.version", {
+          rowId: "override:unused.version",
+          kind: "override",
+          groupId: "__override__",
+          artifactId: "unused.version",
+          dependencyLabel: "$unused.version",
+          rawVersion: "1.2.3",
+          effectiveVersion: "1.2.3",
+          propertyName: "unused.version",
+          propertyValue: "1.2.3",
+          hasLocalPropertyOverride: true,
+          isUnusedOverride: true,
+          overrideTargets: [],
+        }],
+      ]),
+    },
+  ]);
+  const row = report.rows[0]!;
+  assert.equal(row.label, "$unused.version");
+  assert.equal(row.cells[0]?.isUnusedOverride, true);
+  assert.equal(row.cells[0]?.removeOverrideAvailable, true);
+});
+
 test("maven dependency compare selects the matching project from reactor effective pom output", () => {
   const root = parseXmlDocument(`
     <projects>
@@ -406,8 +456,13 @@ test("maven dependency compare report page contains interactive hooks", () => {
   assert.match(html, /\/api\/report/);
   assert.match(html, /Show only differences/);
   assert.match(html, /Hide Version Updates/);
+  assert.match(html, /hideVersionUpdatesControl/);
   assert.match(html, /bootstrap@5\.3\.3/);
   assert.match(html, /statusModal/);
+  assert.match(html, /statusModalHeaderClose/);
+  assert.match(html, /backdrop: 'static'/);
+  assert.match(html, /keyboard: false/);
+  assert.match(html, /overrideTargetsModal/);
   assert.match(html, /Adopt highest for all/);
   assert.match(html, /Remove override for all/);
   assert.match(html, /Version konnte nicht aufgelöst werden/);
@@ -417,12 +472,17 @@ test("maven dependency compare report page contains interactive hooks", () => {
   assert.match(html, /hideProject/);
   assert.match(html, /targetProjectPaths/);
   assert.match(html, /property fehlt/);
+  assert.match(html, /badge-unused/);
+  assert.match(html, /unused/);
   assert.match(html, /Adopt property/);
   assert.match(html, /Adopt properties for all/);
   assert.match(html, /version-link/);
   assert.match(html, /dependency-link/);
   assert.match(html, /badge-update/);
-  assert.match(html, /mvnrepository\.com\/artifact/);
+  assert.match(html, /openOverrideTargetsModal/);
+  assert.match(html, /resolveRepoBaseUrl/);
+  assert.match(html, /repoOverrides/);
+  assert.match(html, /buildArtifactVersionUrl/);
 });
 
 test("maven dependency compare server exposes a local url and closes cleanly", async () => {

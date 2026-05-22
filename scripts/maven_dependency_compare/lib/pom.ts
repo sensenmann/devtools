@@ -1,12 +1,19 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { runSingleCommand } from "../../../src/script-runtime.ts";
 import type { Project } from "../../../src/models.ts";
 import { compareVersions, maxVersion } from "./version.ts";
 import { childElements, cloneElement, ensureChild, firstChild, localName, parseXmlDocument, removeChild, serializeXmlDocument, setTextContent, textContent, walkElements, type XmlElementNode } from "./xml.ts";
 import { ROW_KIND_LABELS, ROW_KIND_ORDER } from "./constants.ts";
+
+const SCRIPT_DIRECTORY = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const CACHE_DIRECTORY = path.join(SCRIPT_DIRECTORY, ".cache");
+const EFFECTIVE_POM_CACHE_DIRECTORY = path.join(CACHE_DIRECTORY, "effective-pom");
+const VERSIONS_REPORT_CACHE_DIRECTORY = path.join(CACHE_DIRECTORY, "versions-report");
 
 export type CompareRowKind = "parent" | "override" | "direct" | "managed";
 
@@ -32,6 +39,7 @@ export interface PomDependencyRow {
   providerVersion?: string;
   availableUpdateVersion?: string;
   hasLocalPropertyOverride: boolean;
+  isUnusedOverride?: boolean;
   overrideTargets?: OverrideTarget[];
 }
 
@@ -47,6 +55,7 @@ export interface ReportCell extends PomDependencyRow {
   present: boolean;
   displayVersion?: string;
   isMissingOverrideWarning: boolean;
+  isUnusedOverride: boolean;
   isHighest: boolean;
   isOutdated: boolean;
   isPinnedBelowProvider: boolean;
@@ -68,6 +77,9 @@ export interface ReportRow {
 export interface CompareReport {
   generatedAt: string;
   projects: Array<{ name: string; path: string }>;
+  enableDependencyUpdates?: boolean;
+  repoDefaultBaseUrl?: string;
+  repoOverrides?: Array<{ pattern: string; baseUrl: string }>;
   rows: ReportRow[];
 }
 
@@ -103,10 +115,35 @@ interface DependencyUpdateEntry {
   availableVersion: string;
 }
 
+function hashContent(content: string): string {
+  return crypto.createHash("sha1").update(content).digest("hex");
+}
+
+function ensureCacheDirectory(directory: string): void {
+  fs.mkdirSync(directory, { recursive: true });
+}
+
+function buildEffectivePomCachePath(contentHash: string, projectCoordinates?: { groupId?: string; artifactId?: string }): string {
+  const coordinatePart = [
+    projectCoordinates?.groupId ?? "nogroup",
+    projectCoordinates?.artifactId ?? "noartifact",
+  ]
+    .map((value) => value.replace(/[^A-Za-z0-9._-]+/g, "_"))
+    .join("__");
+  return path.join(EFFECTIVE_POM_CACHE_DIRECTORY, `${contentHash}__${coordinatePart}.xml`);
+}
+
+function buildVersionsReportCachePath(contentHash: string, goal: string, extraArgs: string[]): string {
+  const argsHash = hashContent(`${goal}\n${extraArgs.join("\n")}`).slice(0, 16);
+  const goalPart = goal.replace(/[^A-Za-z0-9._:-]+/g, "_");
+  return path.join(VERSIONS_REPORT_CACHE_DIRECTORY, `${contentHash}__${goalPart}__${argsHash}.txt`);
+}
+
 export async function analyzeProjects(
   projects: Project[],
   mvnPath: string,
   mode: "fast" | "deep" = "deep",
+  includeDependencyUpdates = true,
   log?: (message: string) => void,
   signal?: AbortSignal,
   outputMode: "capture" | "passthrough" = "capture",
@@ -114,7 +151,7 @@ export async function analyzeProjects(
 ): Promise<ProjectPomAnalysis[]> {
   const analyses: ProjectPomAnalysis[] = [];
   for (const [projectIndex, project] of projects.entries()) {
-    analyses.push(await analyzeProject(project, mvnPath, mode, log, signal, outputMode, {
+    analyses.push(await analyzeProject(project, mvnPath, mode, includeDependencyUpdates, log, signal, outputMode, {
       projectIndex,
       projectCount: projects.length,
       onProbeProgress,
@@ -147,6 +184,7 @@ export function buildCompareReport(analyses: ProjectPomAnalysis[]): CompareRepor
       const effectiveVersion = normalizeResolvedVersion(row?.effectiveVersion, row?.propertyValue);
       const providerVersion = row?.providerVersion;
       const isMissingOverrideWarning = !row && template?.kind === "override";
+      const isUnusedOverride = Boolean(row?.isUnusedOverride);
       const isHighest = Boolean(row && highestVersion && effectiveVersion && compareVersions(effectiveVersion, highestVersion) === 0);
       const isOutdated = Boolean(row && highestVersion && effectiveVersion && compareVersions(effectiveVersion, highestVersion) < 0);
       const isPinnedBelowProvider = Boolean(
@@ -174,11 +212,14 @@ export function buildCompareReport(analyses: ProjectPomAnalysis[]): CompareRepor
         providerVersion,
         availableUpdateVersion: showAvailableUpdateVersion,
         hasLocalPropertyOverride: row?.hasLocalPropertyOverride ?? false,
+        isUnusedOverride,
+        overrideTargets: row?.overrideTargets,
         projectPath: analysis.project.path,
         projectName: analysis.project.name,
         present: Boolean(row),
         displayVersion: effectiveVersion ?? row?.propertyValue ?? row?.rawVersion,
         isMissingOverrideWarning,
+        isUnusedOverride,
         isHighest,
         isOutdated,
         isPinnedBelowProvider,
@@ -186,7 +227,7 @@ export function buildCompareReport(analyses: ProjectPomAnalysis[]): CompareRepor
         showAvailableUpdateVersion: Boolean(row && showAvailableUpdateVersion),
         removeOverrideAvailable: Boolean(
           row?.hasLocalPropertyOverride &&
-          row.providerVersion,
+          (row.providerVersion || row.isUnusedOverride || row.kind === "override"),
         ),
         adoptHighestAvailable: Boolean(row && highestVersion && effectiveVersion && compareVersions(effectiveVersion, highestVersion) < 0),
       };
@@ -219,6 +260,7 @@ export async function adoptHighestVersion(
   sourceProjectPath: string | undefined,
   targetProjectPaths: string[],
   mvnPath: string,
+  log?: (message: string) => void,
 ): Promise<void> {
   const analyses = await analyzeProjectsForPaths([...(sourceProjectPath ? [sourceProjectPath] : []), ...targetProjectPaths], mvnPath);
   const report = buildCompareReport(analyses);
@@ -251,8 +293,11 @@ export async function adoptHighestVersion(
     if (!rowState) {
       continue;
     }
+    const targetVersion = sourceCell.effectiveVersion ?? row.highestVersion!;
+    log?.(`[apply] adopt highest for ${describeRow(rowState)} -> ${targetVersion}`);
+    log?.(`[write] ${analysis.pomPath}`);
     mutatePom(analysis.pomPath, (raw) => {
-      applyAdoptHighest(raw, rowState, sourceCell.effectiveVersion ?? row.highestVersion!, sourceCell.propertyName);
+      applyAdoptHighest(raw, rowState, targetVersion, sourceCell.propertyName);
     });
   }
 }
@@ -261,6 +306,7 @@ export async function removeOverride(
   rowId: string,
   targetProjectPaths: string[],
   mvnPath: string,
+  log?: (message: string) => void,
 ): Promise<void> {
   const analyses = await analyzeProjectsForPaths(targetProjectPaths, mvnPath);
   for (const analysis of analyses) {
@@ -268,6 +314,8 @@ export async function removeOverride(
     if (!row?.hasLocalPropertyOverride || !row.propertyName) {
       continue;
     }
+    log?.(`[apply] remove override for ${describeRow(row)}`);
+    log?.(`[write] ${analysis.pomPath}`);
     mutatePom(analysis.pomPath, (raw) => {
       applyRemoveOverride(raw, row);
     });
@@ -290,6 +338,7 @@ export async function analyzeProjectsForPathsWithProgress(
   projectPaths: string[],
   mvnPath: string,
   mode: "fast" | "deep" = "deep",
+  includeDependencyUpdates = true,
   onProbeProgress?: (progress: ProbeProgress) => void,
 ): Promise<ProjectPomAnalysis[]> {
   const projects = projectPaths.map((projectPath) => ({
@@ -300,13 +349,14 @@ export async function analyzeProjectsForPathsWithProgress(
     projectTypes: ["maven"] as ("maven")[],
     identity: `${path.basename(projectPath)}:${projectPath}`,
   }));
-  return await analyzeProjects(projects, mvnPath, mode, undefined, undefined, "capture", onProbeProgress);
+  return await analyzeProjects(projects, mvnPath, mode, includeDependencyUpdates, undefined, undefined, "capture", onProbeProgress);
 }
 
 async function analyzeProject(
   project: Project,
   mvnPath: string,
   mode: "fast" | "deep",
+  includeDependencyUpdates: boolean,
   log?: (message: string) => void,
   signal?: AbortSignal,
   outputMode: "capture" | "passthrough" = "capture",
@@ -317,11 +367,13 @@ async function analyzeProject(
   },
 ): Promise<ProjectPomAnalysis> {
   const pomPath = path.join(project.path, "pom.xml");
+  const pomContent = fs.readFileSync(pomPath, "utf8");
   const rawPom = loadRawPom(pomPath);
   const effectivePom = await loadEffectivePom(
     pomPath,
     mvnPath,
     { groupId: rawPom.groupId, artifactId: rawPom.artifactId },
+    pomContent,
     log,
     signal,
     outputMode,
@@ -333,7 +385,7 @@ async function analyzeProject(
     projectCount: progress?.projectCount ?? 1,
     onProbeProgress: progress?.onProbeProgress,
   });
-  const availableUpdates = mode === "deep"
+  const availableUpdates = mode === "deep" && includeDependencyUpdates
     ? await resolveAvailableUpdates(
       pomPath,
       mvnPath,
@@ -485,11 +537,17 @@ async function loadEffectivePom(
   pomPath: string,
   mvnPath: string,
   projectCoordinates?: { groupId?: string; artifactId?: string },
+  pomContent?: string,
   log?: (message: string) => void,
   signal?: AbortSignal,
   outputMode: "capture" | "passthrough" = "capture",
   quiet = false,
 ): Promise<XmlElementNode> {
+  const sourceContent = pomContent ?? fs.readFileSync(pomPath, "utf8");
+  const cachePath = buildEffectivePomCachePath(hashContent(sourceContent), projectCoordinates);
+  if (fs.existsSync(cachePath)) {
+    return selectEffectiveProjectRoot(parseXmlDocument(fs.readFileSync(cachePath, "utf8")), projectCoordinates);
+  }
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-effective-pom-"));
   const outputPath = path.join(tempDir, "effective-pom.xml");
   const result = await runSingleCommand(
@@ -504,7 +562,10 @@ async function loadEffectivePom(
   if (!result.success || !fs.existsSync(outputPath)) {
     throw new Error(`Could not resolve effective POM for ${pomPath}. ${result.message}`);
   }
-  return selectEffectiveProjectRoot(parseXmlDocument(fs.readFileSync(outputPath, "utf8")), projectCoordinates);
+  const effectivePomContent = fs.readFileSync(outputPath, "utf8");
+  ensureCacheDirectory(EFFECTIVE_POM_CACHE_DIRECTORY);
+  fs.writeFileSync(cachePath, effectivePomContent, "utf8");
+  return selectEffectiveProjectRoot(parseXmlDocument(effectivePomContent), projectCoordinates);
 }
 
 function buildOverrideRows(
@@ -514,13 +575,11 @@ function buildOverrideRows(
 ): PomDependencyRow[] {
   const overrideRows: PomDependencyRow[] = [];
   for (const [propertyName, propertyValue] of rawPom.localProperties.entries()) {
+    if (!isVersionLikeProperty(propertyName)) {
+      continue;
+    }
     const propertyProbe = propertyProbeCache.get(propertyName);
-    if (!propertyProbe && !(mode === "fast" && isVersionLikeProperty(propertyName) && !isDirectlyReferencedProperty(rawPom, propertyName))) {
-      continue;
-    }
-    if (propertyProbe && !propertyProbe.forceRow && !propertyProbe.propertyProviderValue && propertyProbe.targets.length === 0) {
-      continue;
-    }
+    const isUnusedOverride = !propertyProbe || (!propertyProbe.propertyProviderValue && propertyProbe.targets.length === 0);
     const providerVersion = maxVersion(
       [
         propertyProbe?.propertyProviderValue,
@@ -541,6 +600,7 @@ function buildOverrideRows(
       propertyValue,
       providerVersion,
       hasLocalPropertyOverride: true,
+      isUnusedOverride,
       overrideTargets: propertyProbe?.targets ?? [],
     });
   }
@@ -692,14 +752,16 @@ async function resolveAllVersionPropertiesBaseline(
   for (const propertyName of removablePropertyNames) {
     removePropertyDefinition(cloned, propertyName);
   }
+  const clonedContent = serializeXmlDocument(cloned);
   const projectDir = path.dirname(pomPath);
   const tempPomPath = path.join(projectDir, `.devtools-provider-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.pom.xml`);
-  fs.writeFileSync(tempPomPath, serializeXmlDocument(cloned), "utf8");
+  fs.writeFileSync(tempPomPath, clonedContent, "utf8");
   try {
     const providerPom = await loadEffectivePom(
       tempPomPath,
       mvnPath,
       { groupId: rawPom.groupId, artifactId: rawPom.artifactId },
+      clonedContent,
       log,
       signal,
       "capture",
@@ -884,6 +946,11 @@ async function runVersionsDisplayGoal(
   signal?: AbortSignal,
   outputMode: "capture" | "passthrough" = "capture",
 ): Promise<string> {
+  const pomContent = fs.readFileSync(pomPath, "utf8");
+  const cachePath = buildVersionsReportCachePath(hashContent(pomContent), goal, extraArgs);
+  if (fs.existsSync(cachePath)) {
+    return fs.readFileSync(cachePath, "utf8");
+  }
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-versions-report-"));
   const outputPath = path.join(tempDir, "updates.txt");
   try {
@@ -909,7 +976,10 @@ async function runVersionsDisplayGoal(
     if (!result.success || !fs.existsSync(outputPath)) {
       return "";
     }
-    return fs.readFileSync(outputPath, "utf8");
+    const reportContent = fs.readFileSync(outputPath, "utf8");
+    ensureCacheDirectory(VERSIONS_REPORT_CACHE_DIRECTORY);
+    fs.writeFileSync(cachePath, reportContent, "utf8");
+    return reportContent;
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -986,14 +1056,16 @@ async function resolvePropertyOverrideRows(
 ): Promise<PropertyProbeResult | undefined> {
   const cloned = cloneElement(rawPom.root);
   removePropertyDefinition(cloned, propertyName);
+  const clonedContent = serializeXmlDocument(cloned);
   const projectDir = path.dirname(pomPath);
   const tempPomPath = path.join(projectDir, `.devtools-provider-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.pom.xml`);
-  fs.writeFileSync(tempPomPath, serializeXmlDocument(cloned), "utf8");
+  fs.writeFileSync(tempPomPath, clonedContent, "utf8");
   try {
     const providerPom = await loadEffectivePom(
       tempPomPath,
       mvnPath,
       { groupId: rawPom.groupId, artifactId: rawPom.artifactId },
+      clonedContent,
       log,
       signal,
       "capture",
@@ -1112,6 +1184,13 @@ function mutatePom(pomPath: string, mutate: (root: XmlElementNode) => void): voi
   const root = parseXmlDocument(fs.readFileSync(pomPath, "utf8"));
   mutate(root);
   fs.writeFileSync(pomPath, serializeXmlDocument(root), "utf8");
+}
+
+function describeRow(row: Pick<PomDependencyRow, "kind" | "dependencyLabel" | "propertyName">): string {
+  if (row.kind === "override") {
+    return `$${row.propertyName ?? row.dependencyLabel.replace(/^\$/, "")}`;
+  }
+  return `${row.kind} ${row.dependencyLabel}`;
 }
 
 function removePropertyDefinition(root: XmlElementNode, propertyName: string): void {

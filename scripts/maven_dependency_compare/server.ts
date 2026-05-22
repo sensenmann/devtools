@@ -21,6 +21,9 @@ export interface CompareServerSession {
 interface StartCompareServerOptions {
   projectPaths: string[];
   mode?: "fast" | "deep";
+  enableDependencyUpdates?: boolean;
+  defaultRepoBaseUrl?: string;
+  repoOverrides?: Array<{ pattern: string; baseUrl: string }>;
   signal?: AbortSignal;
   openBrowser?: boolean;
   onStarted?: (url: string) => void;
@@ -33,10 +36,17 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
   }
 
   const probeWriter = createProbeWriter();
+  const actionLogger = createActionLogger(probeWriter);
   let lastAccess = Date.now();
   const mode = options.mode ?? "deep";
-  let analyses = await loadReportAnalyses(options.projectPaths, mvnPath, mode, probeWriter);
-  let report = enrichReport(buildCompareReport(analyses));
+  const enableDependencyUpdates = options.enableDependencyUpdates !== false;
+  let analyses = await loadReportAnalyses(options.projectPaths, mvnPath, mode, enableDependencyUpdates, probeWriter);
+  let report = enrichReport({
+    ...buildCompareReport(analyses),
+    enableDependencyUpdates,
+    repoDefaultBaseUrl: options.defaultRepoBaseUrl,
+    repoOverrides: options.repoOverrides ?? [],
+  });
   let interval: NodeJS.Timeout | undefined;
   let resolved = false;
   let closedResolve: (() => void) | undefined;
@@ -70,7 +80,14 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
             : body.allProjects
             ? (row?.cells.filter((cell) => cell.present && cell.projectPath !== source?.projectPath).map((cell) => cell.projectPath) ?? [])
             : body.targetProjectPath ? [String(body.targetProjectPath)] : [];
-          await adoptHighestVersion(String(body.rowId), source?.projectPath, targets, mvnPath);
+          actionLogger(`[action] adopt-highest ${String(body.rowId)}`);
+          if (source?.projectPath) {
+            actionLogger(`[source] ${source.projectPath}`);
+          }
+          for (const target of targets) {
+            actionLogger(`[target] ${target}`);
+          }
+          await adoptHighestVersion(String(body.rowId), source?.projectPath, targets, mvnPath, actionLogger);
           changedProjectPaths = targets;
         } else if (request.url === "/api/actions/remove-override") {
           const row = report.rows.find((entry) => entry.rowId === body.rowId);
@@ -80,11 +97,24 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
             : body.allProjects
             ? (row?.cells.filter((cell) => cell.removeOverrideAvailable).map((cell) => cell.projectPath) ?? [])
             : body.targetProjectPath ? [String(body.targetProjectPath)] : [];
-          await removeOverride(String(body.rowId), targets, mvnPath);
+          actionLogger(`[action] remove-override ${String(body.rowId)}`);
+          for (const target of targets) {
+            actionLogger(`[target] ${target}`);
+          }
+          await removeOverride(String(body.rowId), targets, mvnPath, actionLogger);
           changedProjectPaths = targets;
         } else if (request.url === "/api/actions/reload-all") {
-          analyses = await loadReportAnalyses(options.projectPaths, mvnPath, mode, probeWriter);
-          report = enrichReport(buildCompareReport(analyses));
+          actionLogger(`[action] reload-all ${options.projectPaths.length} project(s)`);
+          for (const projectPath of options.projectPaths) {
+            actionLogger(`[reload] ${projectPath}`);
+          }
+          analyses = await loadReportAnalyses(options.projectPaths, mvnPath, mode, enableDependencyUpdates, probeWriter);
+          report = enrichReport({
+            ...buildCompareReport(analyses),
+            enableDependencyUpdates,
+            repoDefaultBaseUrl: options.defaultRepoBaseUrl,
+            repoOverrides: options.repoOverrides ?? [],
+          });
           response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
           response.end(JSON.stringify({
             report,
@@ -98,8 +128,17 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
           return;
         }
         if (changedProjectPaths.length > 0) {
-          analyses = await refreshChangedProjects(analyses, changedProjectPaths, mvnPath, mode, probeWriter);
-          report = enrichReport(buildCompareReport(analyses));
+          actionLogger(`[refresh] reloading ${changedProjectPaths.length} changed project(s)`);
+          for (const projectPath of changedProjectPaths) {
+            actionLogger(`[refresh] ${projectPath}`);
+          }
+          analyses = await refreshChangedProjects(analyses, changedProjectPaths, mvnPath, mode, enableDependencyUpdates, probeWriter);
+          report = enrichReport({
+            ...buildCompareReport(analyses),
+            enableDependencyUpdates,
+            repoDefaultBaseUrl: options.defaultRepoBaseUrl,
+            repoOverrides: options.repoOverrides ?? [],
+          });
         }
         response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
         response.end(JSON.stringify({
@@ -191,9 +230,10 @@ async function loadReportAnalyses(
   projectPaths: string[],
   mvnPath: string,
   mode: "fast" | "deep",
+  includeDependencyUpdates: boolean,
   updateProbeLine: (message?: string) => void,
 ) {
-  const analyses = await analyzeCompareProjectsWithProgress(projectPaths, mvnPath, mode, (progress) => {
+  const analyses = await analyzeCompareProjectsWithProgress(projectPaths, mvnPath, mode, includeDependencyUpdates, (progress) => {
     const scope = progress.stage === "update"
       ? progress.propertyName
       : progress.propertyCount > 0
@@ -212,6 +252,7 @@ async function refreshChangedProjects(
   changedProjectPaths: string[],
   mvnPath: string,
   mode: "fast" | "deep",
+  includeDependencyUpdates: boolean,
   updateProbeLine: (message?: string) => void,
 ): Promise<ProjectPomAnalysis[]> {
   const changedPaths = [...new Set(changedProjectPaths)];
@@ -221,7 +262,7 @@ async function refreshChangedProjects(
   if (changedProjects.length === 0) {
     return currentAnalyses;
   }
-  const refreshed = await analyzeProjects(changedProjects, mvnPath, mode, undefined, undefined, "capture", (progress) => {
+  const refreshed = await analyzeProjects(changedProjects, mvnPath, mode, includeDependencyUpdates, undefined, undefined, "capture", (progress) => {
     const scope = progress.stage === "update"
       ? progress.propertyName
       : progress.propertyCount > 0
@@ -251,6 +292,13 @@ function createProbeWriter(): (message?: string) => void {
     }
     active = true;
     process.stdout.write(`\r\x1b[2K${message}`);
+  };
+}
+
+function createActionLogger(clearProbeLine: (message?: string) => void): (message: string) => void {
+  return (message: string) => {
+    clearProbeLine();
+    process.stdout.write(`${message}\n`);
   };
 }
 

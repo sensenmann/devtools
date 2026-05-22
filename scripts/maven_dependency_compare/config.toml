@@ -1,0 +1,20 @@
+# Base URL used for normal dependency and version links.
+# The report appends:
+# - <groupId>/<artifactId>
+# - <groupId>/<artifactId>/<version>
+default_repo_baseurl = "https://mvnrepository.com/artifact/"
+
+# Enable or disable the additional deep-mode check for newer dependency/property versions.
+enable_dependency_updates = false
+
+# Optional per-group overrides in the form:
+#   "<pattern>=<baseurl>"
+#
+# Matching rules:
+# - entries with `*` use simple wildcard matching, e.g. "at.gv.brz.*"
+# - entries without `*` are treated as prefix matches, e.g. "com.mycompany."
+#
+# The first matching override wins.
+repo_overrides = [
+  "at.gv.brz.=https://centralrepo.apps.a3.cp.cna.at/ui/packages/gav:%2F%2F",
+]

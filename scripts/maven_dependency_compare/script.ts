@@ -1,5 +1,9 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import type { BuiltinScriptResponse, ScriptContext } from "../../src/models.ts";
 import { resolveExecutable } from "../../src/script-runtime.ts";
+import { loadCompareConfig } from "./config.ts";
 import { startCompareServer } from "./server.ts";
 
 export async function mavenDependencyCompare(context: ScriptContext): Promise<BuiltinScriptResponse> {
@@ -12,10 +16,15 @@ export async function mavenDependencyCompare(context: ScriptContext): Promise<Bu
   if (!mvnPath) {
     return { success: false, message: "mvn was not found on PATH." };
   }
+  const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const config = loadCompareConfig(scriptDirectory);
 
   const session = await startCompareServer({
     projectPaths: mvnProjects.map((project) => project.path),
     mode,
+    enableDependencyUpdates: config.enableDependencyUpdates,
+    defaultRepoBaseUrl: config.defaultRepoBaseUrl,
+    repoOverrides: config.repoOverrides,
     signal: context.signal,
     onStarted: (url) => {
       context.log?.(`[server] ${url}`);
