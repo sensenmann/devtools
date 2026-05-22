@@ -302,6 +302,84 @@ test("executor runs global scripts once without project selection", async () => 
   assert.match(results[0]?.output ?? "", /global-run/);
 });
 
+test("executor forwards shared batch metadata across project runs", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-executor-batch-"));
+  fs.writeFileSync(
+    path.join(root, "script.ts"),
+    [
+      "export function batchTask(context) {",
+      "  process.stdout.write(JSON.stringify({",
+      "    batchRunId: context.batchRunId,",
+      "    batchProjectIndex: context.batchProjectIndex,",
+      "    batchProjectCount: context.batchProjectCount",
+      "  }) + '\\n');",
+      "  return { success: true, message: 'ok' };",
+      "}",
+    ].join("\n"),
+    "utf8",
+  );
+  const config: AppConfig = {
+    configPath: path.join(root, "devtools.toml"),
+    discovery: {
+      roots: [root],
+      includePatterns: [],
+      excludePatterns: [],
+      projectTypes: ["python"],
+      cacheFile: path.join(root, ".cache.json"),
+    },
+    scripts: {
+      directory: path.join(root, "scripts"),
+    },
+    tui: {
+      confirmRun: true,
+      favoritesFile: path.join(root, ".favorites.json"),
+      scriptStateFile: path.join(root, ".script-state.json"),
+      scheduledJobsFile: path.join(root, ".scheduled-jobs.json"),
+      projectRows: 10,
+      summaryRows: 6,
+      projectSort: "alphabetical",
+    },
+  };
+  const script: ScriptDefinition = {
+    scriptId: "batch_task",
+    name: "Batch Task",
+    description: "",
+    projectTypes: ["python"],
+    entry: "batchTask",
+    directory: root,
+    manifestPath: path.join(root, "manifest.toml"),
+    defaultArgs: {},
+  };
+  const projects: Project[] = [
+    {
+      name: "one",
+      path: path.join(root, "one"),
+      projectType: "python",
+      marker: "pyproject.toml",
+      projectTypes: ["python"],
+      identity: `one:${root}`,
+    },
+    {
+      name: "two",
+      path: path.join(root, "two"),
+      projectType: "python",
+      marker: "pyproject.toml",
+      projectTypes: ["python"],
+      identity: `two:${root}`,
+    },
+  ];
+
+  const results = await runScriptForProjects(config, script, projects);
+  const first = JSON.parse((results[0]?.output ?? "").trim()) as { batchRunId: string; batchProjectIndex: number; batchProjectCount: number };
+  const second = JSON.parse((results[1]?.output ?? "").trim()) as { batchRunId: string; batchProjectIndex: number; batchProjectCount: number };
+
+  assert.equal(first.batchProjectCount, 2);
+  assert.equal(second.batchProjectCount, 2);
+  assert.equal(first.batchProjectIndex, 0);
+  assert.equal(second.batchProjectIndex, 1);
+  assert.equal(first.batchRunId, second.batchRunId);
+});
+
 test("executor prints a visible project banner in passthrough mode", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-executor-banner-"));
   writeEchoProjectModule(root);

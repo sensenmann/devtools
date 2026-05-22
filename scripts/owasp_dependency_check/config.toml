@@ -1,0 +1,21 @@
+# URL of the prebuilt ODC database file. The remote file is stored locally as odc.mv.db.
+db_url = "https://centralrepo.apps.a3.cp.cna.at/artifactory/brz-nvd-cve-local-generic/odc.v12n.mv.db"
+
+# Optional override for the shared ODC cache directory.
+# Default:
+# - macOS:   ~/Library/Caches/devtools/odc
+# - Linux:   ~/.cache/devtools/odc
+# - Windows: %LOCALAPPDATA%/devtools/odc
+cache_dir = "~/Library/Caches/devtools/odc"
+
+# Optional override for the shared report directory.
+# The aggregated report is written to <report_dir>/latest/index.html.
+report_dir = "~/Library/Caches/devtools/odc-reports"
+
+# Optional: disable TLS certificate validation for the DB download.
+# Useful only for internal servers with custom or broken cert chains.
+ignore_ssl = true
+
+# Optional: open the aggregated HTML report in the system default browser
+# after the last selected project has finished.
+open_report = true

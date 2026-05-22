@@ -13,9 +13,14 @@ export async function runScriptForProjects(
   signal?: AbortSignal,
   outputMode: RunOutputMode = "capture",
 ): Promise<ExecutionResult[]> {
+  const batchRunId = randomUUID().replaceAll("-", "");
   if (script.scope === "global") {
     eventCallback?.(`[start] ${script.scriptId} -> global`);
-    const result = await runScriptForProject(config, script, undefined, cliArgs, eventCallback, signal, outputMode);
+    const result = await runScriptForProject(config, script, undefined, cliArgs, eventCallback, signal, outputMode, {
+      batchRunId,
+      batchProjectIndex: 0,
+      batchProjectCount: 0,
+    });
     const prefix = result.success ? "ok" : "fail";
     const detail = result.message || result.error;
     eventCallback?.(`[${prefix}] global :: ${detail}`);
@@ -23,7 +28,7 @@ export async function runScriptForProjects(
   }
 
   const results: ExecutionResult[] = [];
-  for (const project of projects) {
+  for (const [projectIndex, project] of projects.entries()) {
     if (signal?.aborted) {
       eventCallback?.("[cancelled] Script execution interrupted.");
       break;
@@ -43,7 +48,11 @@ export async function runScriptForProjects(
     }
     writeProjectBanner(project, outputMode);
     eventCallback?.(`[start] ${script.scriptId} -> ${project.path}`);
-    const result = await runScriptForProject(config, script, project, cliArgs, eventCallback, signal, outputMode);
+    const result = await runScriptForProject(config, script, project, cliArgs, eventCallback, signal, outputMode, {
+      batchRunId,
+      batchProjectIndex: projectIndex,
+      batchProjectCount: projects.length,
+    });
     results.push(result);
     const prefix = result.success ? "ok" : "fail";
     const detail = result.message || result.error;
@@ -76,6 +85,11 @@ export async function runScriptForProject(
   eventCallback?: (message: string) => void,
   signal?: AbortSignal,
   outputMode: RunOutputMode = "capture",
+  batchMetadata?: {
+    batchRunId: string;
+    batchProjectIndex: number;
+    batchProjectCount: number;
+  },
 ): Promise<ExecutionResult> {
   const args = { ...script.defaultArgs, ...cliArgs };
   const context: ScriptContext = {
@@ -84,6 +98,9 @@ export async function runScriptForProject(
     project,
     args,
     runId: randomUUID().replaceAll("-", ""),
+    batchRunId: batchMetadata?.batchRunId,
+    batchProjectIndex: batchMetadata?.batchProjectIndex,
+    batchProjectCount: batchMetadata?.batchProjectCount,
     log: eventCallback,
     signal,
     outputMode,

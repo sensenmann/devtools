@@ -1,0 +1,13 @@
+id = "owasp_dependency_check"
+name = "🔒 OWASP Dependency Check"
+description = "Run OWASP Dependency Check for the selected Maven project and generate an aggregated vulnerability index."
+project_types = ["maven"]
+entry = "owaspDependencyCheck"
+group = "Security"
+variant_key = "mode"
+variant_values = ["quick", "full"]
+variant_default = "full"
+
+[variant_arg_values]
+quick = "quick"
+full = "full"

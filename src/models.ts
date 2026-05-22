@@ -89,6 +89,9 @@ export interface ScriptContext {
   project?: Project;
   args: Record<string, unknown>;
   runId: string;
+  batchRunId?: string;
+  batchProjectIndex?: number;
+  batchProjectCount?: number;
   log?: (message: string) => void;
   signal?: AbortSignal;
   outputMode?: RunOutputMode;
