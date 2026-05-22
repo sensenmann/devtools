@@ -45,9 +45,11 @@ export interface ReportCell extends PomDependencyRow {
   projectName: string;
   present: boolean;
   displayVersion?: string;
+  isMissingOverrideWarning: boolean;
   isHighest: boolean;
   isOutdated: boolean;
   isPinnedBelowProvider: boolean;
+  hasDifferentProviderVersion: boolean;
   removeOverrideAvailable: boolean;
   adoptHighestAvailable: boolean;
 }
@@ -75,16 +77,36 @@ interface RawPomModel {
   rows: Map<string, PomDependencyRow>;
 }
 
+interface PropertyProbeResult {
+  targets: OverrideTarget[];
+  propertyProviderValue?: string;
+}
+
+interface ProbeProgress {
+  projectName: string;
+  projectIndex: number;
+  projectCount: number;
+  propertyName: string;
+  propertyIndex: number;
+  propertyCount: number;
+}
+
 export async function analyzeProjects(
   projects: Project[],
   mvnPath: string,
+  mode: "fast" | "deep" = "deep",
   log?: (message: string) => void,
   signal?: AbortSignal,
   outputMode: "capture" | "passthrough" = "capture",
+  onProbeProgress?: (progress: ProbeProgress) => void,
 ): Promise<ProjectPomAnalysis[]> {
   const analyses: ProjectPomAnalysis[] = [];
-  for (const project of projects) {
-    analyses.push(await analyzeProject(project, mvnPath, log, signal, outputMode));
+  for (const [projectIndex, project] of projects.entries()) {
+    analyses.push(await analyzeProject(project, mvnPath, mode, log, signal, outputMode, {
+      projectIndex,
+      projectCount: projects.length,
+      onProbeProgress,
+    }));
   }
   return analyses;
 }
@@ -103,6 +125,7 @@ export function buildCompareReport(analyses: ProjectPomAnalysis[]): CompareRepor
       const row = analysis.rows.get(rowId);
       const effectiveVersion = normalizeResolvedVersion(row?.effectiveVersion, row?.propertyValue);
       const providerVersion = row?.providerVersion;
+      const isMissingOverrideWarning = !row && template?.kind === "override";
       const isHighest = Boolean(row && highestVersion && effectiveVersion && compareVersions(effectiveVersion, highestVersion) === 0);
       const isOutdated = Boolean(row && highestVersion && effectiveVersion && compareVersions(effectiveVersion, highestVersion) < 0);
       const isPinnedBelowProvider = Boolean(
@@ -110,6 +133,12 @@ export function buildCompareReport(analyses: ProjectPomAnalysis[]): CompareRepor
         effectiveVersion &&
         providerVersion &&
         compareVersions(providerVersion, effectiveVersion) > 0,
+      );
+      const hasDifferentProviderVersion = Boolean(
+        row?.hasLocalPropertyOverride &&
+        effectiveVersion &&
+        providerVersion &&
+        compareVersions(providerVersion, effectiveVersion) !== 0,
       );
       return {
         rowId,
@@ -127,9 +156,11 @@ export function buildCompareReport(analyses: ProjectPomAnalysis[]): CompareRepor
         projectName: analysis.project.name,
         present: Boolean(row),
         displayVersion: effectiveVersion ?? row?.propertyValue ?? row?.rawVersion,
+        isMissingOverrideWarning,
         isHighest,
         isOutdated,
         isPinnedBelowProvider,
+        hasDifferentProviderVersion,
         removeOverrideAvailable: Boolean(
           row?.hasLocalPropertyOverride &&
           row.providerVersion,
@@ -177,8 +208,23 @@ export async function adoptHighestVersion(
   }
   for (const targetPath of targetProjectPaths) {
     const analysis = analyses.find((entry) => entry.project.path === targetPath);
-    const rowState = analysis?.rows.get(rowId);
-    if (!analysis || !rowState) {
+    if (!analysis) {
+      continue;
+    }
+    const rowState = analysis.rows.get(rowId) ?? (
+      row.kind === "override" && sourceCell.propertyName
+        ? {
+          rowId,
+          kind: "override" as const,
+          groupId: "__override__",
+          artifactId: sourceCell.propertyName,
+          dependencyLabel: row.label,
+          propertyName: sourceCell.propertyName,
+          hasLocalPropertyOverride: true,
+        }
+        : undefined
+    );
+    if (!rowState) {
       continue;
     }
     mutatePom(analysis.pomPath, (raw) => {
@@ -216,12 +262,35 @@ export async function analyzeProjectsForPaths(projectPaths: string[], mvnPath: s
   return await analyzeProjects(projects, mvnPath);
 }
 
+export async function analyzeProjectsForPathsWithProgress(
+  projectPaths: string[],
+  mvnPath: string,
+  mode: "fast" | "deep" = "deep",
+  onProbeProgress?: (progress: ProbeProgress) => void,
+): Promise<ProjectPomAnalysis[]> {
+  const projects = projectPaths.map((projectPath) => ({
+    name: path.basename(projectPath),
+    path: projectPath,
+    projectType: "maven" as const,
+    marker: "pom.xml",
+    projectTypes: ["maven"] as ("maven")[],
+    identity: `${path.basename(projectPath)}:${projectPath}`,
+  }));
+  return await analyzeProjects(projects, mvnPath, mode, undefined, undefined, "capture", onProbeProgress);
+}
+
 async function analyzeProject(
   project: Project,
   mvnPath: string,
+  mode: "fast" | "deep",
   log?: (message: string) => void,
   signal?: AbortSignal,
   outputMode: "capture" | "passthrough" = "capture",
+  progress?: {
+    projectIndex: number;
+    projectCount: number;
+    onProbeProgress?: (progress: ProbeProgress) => void;
+  },
 ): Promise<ProjectPomAnalysis> {
   const pomPath = path.join(project.path, "pom.xml");
   const rawPom = loadRawPom(pomPath);
@@ -234,12 +303,18 @@ async function analyzeProject(
     outputMode,
   );
   const effectiveRows = extractEffectiveRows(effectivePom);
+  const propertyProbeCache = await buildPropertyProbeCache(pomPath, mvnPath, rawPom, effectiveRows, mode, log, signal, outputMode, {
+    projectName: project.name,
+    projectIndex: progress?.projectIndex ?? 0,
+    projectCount: progress?.projectCount ?? 1,
+    onProbeProgress: progress?.onProbeProgress,
+  });
 
   const rows = new Map<string, PomDependencyRow>();
   for (const [rowId, row] of rawPom.rows.entries()) {
     const effectiveRow = effectiveRows.get(rowId);
-    const providerVersion = row.hasLocalPropertyOverride
-      ? await resolveProviderVersionForRow(pomPath, mvnPath, rawPom, row, log, signal, outputMode)
+    const providerVersion = row.propertyName
+      ? propertyProbeCache.get(row.propertyName)?.targets.find((target) => target.rowId === rowId)?.providerVersion
       : undefined;
     rows.set(rowId, {
       ...row,
@@ -247,7 +322,7 @@ async function analyzeProject(
       providerVersion: normalizeResolvedVersion(providerVersion, undefined),
     });
   }
-  for (const overrideRow of await buildOverrideRows(pomPath, mvnPath, rawPom, effectiveRows, log, signal, outputMode)) {
+  for (const overrideRow of buildOverrideRows(rawPom, propertyProbeCache)) {
     rows.set(overrideRow.rowId, overrideRow);
   }
 
@@ -385,37 +460,33 @@ async function loadEffectivePom(
   return selectEffectiveProjectRoot(parseXmlDocument(fs.readFileSync(outputPath, "utf8")), projectCoordinates);
 }
 
-async function buildOverrideRows(
-  pomPath: string,
-  mvnPath: string,
+function buildOverrideRows(
   rawPom: RawPomModel,
-  effectiveRows: Map<string, PomDependencyRow>,
-  log?: (message: string) => void,
-  signal?: AbortSignal,
-  outputMode: "capture" | "passthrough" = "capture",
-): Promise<PomDependencyRow[]> {
+  propertyProbeCache: Map<string, PropertyProbeResult>,
+): PomDependencyRow[] {
   const overrideRows: PomDependencyRow[] = [];
   for (const [propertyName, propertyValue] of rawPom.localProperties.entries()) {
-    const propertyProbe = await resolvePropertyOverrideRows(
-      pomPath,
-      mvnPath,
-      rawPom,
-      propertyName,
-      effectiveRows,
-      log,
-      signal,
-      outputMode,
-    );
-    if (!propertyProbe || propertyProbe.targets.length === 0) {
+    const propertyProbe = propertyProbeCache.get(propertyName);
+    if (!propertyProbe) {
       continue;
     }
-    if (!propertyProbe.targets.some((target) => rawPom.rows.get(target.rowId)?.propertyName !== propertyName)) {
+    if (!propertyProbe.propertyProviderValue && propertyProbe.targets.length === 0) {
+      continue;
+    }
+    if (
+      propertyProbe.targets.length > 0 &&
+      !propertyProbe.propertyProviderValue &&
+      !propertyProbe.targets.some((target) => rawPom.rows.get(target.rowId)?.propertyName !== propertyName)
+    ) {
       continue;
     }
     const providerVersion = maxVersion(
-      propertyProbe.targets
+      [
+        propertyProbe.propertyProviderValue,
+        ...propertyProbe.targets
         .map((target) => normalizeResolvedVersion(target.providerVersion, undefined))
         .filter((value): value is string => Boolean(value)),
+      ],
     );
     overrideRows.push({
       rowId: `override:${propertyName}`,
@@ -435,6 +506,170 @@ async function buildOverrideRows(
   return overrideRows;
 }
 
+async function buildPropertyProbeCache(
+  pomPath: string,
+  mvnPath: string,
+  rawPom: RawPomModel,
+  effectiveRows: Map<string, PomDependencyRow>,
+  mode: "fast" | "deep",
+  log?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+  progress?: {
+    projectName: string;
+    projectIndex: number;
+    projectCount: number;
+    onProbeProgress?: (progress: ProbeProgress) => void;
+  },
+): Promise<Map<string, PropertyProbeResult>> {
+  const cache = new Map<string, PropertyProbeResult>();
+  const propertyNames = [...rawPom.localProperties.keys()].filter(isVersionLikeProperty);
+  if (mode === "fast") {
+    const baseline = await resolveAllVersionPropertiesBaseline(
+      pomPath,
+      mvnPath,
+      rawPom,
+      effectiveRows,
+      log,
+      signal,
+      outputMode,
+      progress,
+    );
+    for (const propertyName of propertyNames) {
+      const propertyProbe = buildFastPropertyProbe(rawPom, baseline, propertyName);
+      if (propertyProbe) {
+        cache.set(propertyName, propertyProbe);
+      }
+    }
+    return cache;
+  }
+  for (const [propertyIndex, propertyName] of propertyNames.entries()) {
+    progress?.onProbeProgress?.({
+      projectName: progress.projectName,
+      projectIndex: progress.projectIndex,
+      projectCount: progress.projectCount,
+      propertyName,
+      propertyIndex,
+      propertyCount: propertyNames.length,
+    });
+    const propertyProbe = await resolvePropertyOverrideRows(
+      pomPath,
+      mvnPath,
+      rawPom,
+      propertyName,
+      effectiveRows,
+      log,
+      signal,
+      outputMode,
+    );
+    if (propertyProbe) {
+      cache.set(propertyName, propertyProbe);
+    }
+  }
+  return cache;
+}
+
+interface FastBaseline {
+  providerRows: Map<string, PomDependencyRow>;
+  providerProperties: Map<string, string>;
+  changedTargets: OverrideTarget[];
+}
+
+async function resolveAllVersionPropertiesBaseline(
+  pomPath: string,
+  mvnPath: string,
+  rawPom: RawPomModel,
+  effectiveRows: Map<string, PomDependencyRow>,
+  log?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+  progress?: {
+    projectName: string;
+    projectIndex: number;
+    projectCount: number;
+    onProbeProgress?: (progress: ProbeProgress) => void;
+  },
+): Promise<FastBaseline | undefined> {
+  progress?.onProbeProgress?.({
+    projectName: progress.projectName,
+    projectIndex: progress.projectIndex,
+    projectCount: progress.projectCount,
+    propertyName: "",
+    propertyIndex: 0,
+    propertyCount: 0,
+  });
+  const cloned = cloneElement(rawPom.root);
+  for (const propertyName of [...rawPom.localProperties.keys()].filter(isVersionLikeProperty)) {
+    removePropertyDefinition(cloned, propertyName);
+  }
+  const projectDir = path.dirname(pomPath);
+  const tempPomPath = path.join(projectDir, `.devtools-provider-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.pom.xml`);
+  fs.writeFileSync(tempPomPath, serializeXmlDocument(cloned), "utf8");
+  try {
+    const providerPom = await loadEffectivePom(
+      tempPomPath,
+      mvnPath,
+      { groupId: rawPom.groupId, artifactId: rawPom.artifactId },
+      log,
+      signal,
+      "capture",
+      true,
+    );
+    return {
+      providerRows: extractEffectiveRows(providerPom),
+      providerProperties: extractProperties(providerPom),
+      changedTargets: extractChangedTargets(effectiveRows, extractEffectiveRows(providerPom)),
+    };
+  } catch {
+    return undefined;
+  } finally {
+    fs.rmSync(tempPomPath, { force: true });
+  }
+}
+
+function buildFastPropertyProbe(
+  rawPom: RawPomModel,
+  baseline: FastBaseline | undefined,
+  propertyName: string,
+): PropertyProbeResult | undefined {
+  if (!baseline) {
+    return undefined;
+  }
+  const directTargets = [...rawPom.rows.values()]
+    .filter((row) => row.propertyName === propertyName && row.kind !== "parent")
+    .map((row) => ({
+      rowId: row.rowId,
+      kind: row.kind as Exclude<CompareRowKind, "override" | "parent">,
+      groupId: row.groupId,
+      artifactId: row.artifactId,
+      dependencyLabel: row.dependencyLabel,
+      providerVersion: normalizeResolvedVersion(
+        baseline.providerRows.get(row.rowId)?.effectiveVersion ?? baseline.providerRows.get(row.rowId)?.rawVersion,
+        undefined,
+      ),
+    }))
+    .filter((target) => Boolean(target.providerVersion));
+  const inferredTargets = directTargets.length > 0
+    ? directTargets
+    : baseline.changedTargets.filter((target) => matchesPropertyTarget(propertyName, target));
+
+  const currentPropertyValue = rawPom.localProperties.get(propertyName);
+  const providerPropertyValue = baseline.providerProperties.get(propertyName);
+  const propertyChanged = Boolean(providerPropertyValue && currentPropertyValue && providerPropertyValue !== currentPropertyValue);
+
+  if (!propertyChanged && inferredTargets.length === 0) {
+    return undefined;
+  }
+  return {
+    targets: inferredTargets,
+    propertyProviderValue: propertyChanged ? providerPropertyValue : undefined,
+  };
+}
+
+function isVersionLikeProperty(propertyName: string): boolean {
+  return /(?:^|[._-])version$/i.test(propertyName);
+}
+
 async function resolvePropertyOverrideRows(
   pomPath: string,
   mvnPath: string,
@@ -444,7 +679,7 @@ async function resolvePropertyOverrideRows(
   log?: (message: string) => void,
   signal?: AbortSignal,
   outputMode: "capture" | "passthrough" = "capture",
-): Promise<{ targets: OverrideTarget[] } | undefined> {
+): Promise<PropertyProbeResult | undefined> {
   const cloned = cloneElement(rawPom.root);
   removePropertyDefinition(cloned, propertyName);
   const projectDir = path.dirname(pomPath);
@@ -484,47 +719,10 @@ async function resolvePropertyOverrideRows(
       return undefined;
     }
     changedTargets.sort((left, right) => left.dependencyLabel.localeCompare(right.dependencyLabel));
-    return { targets: changedTargets };
-  } catch {
-    return undefined;
-  } finally {
-    fs.rmSync(tempPomPath, { force: true });
-  }
-}
-
-async function resolveProviderVersionForRow(
-  pomPath: string,
-  mvnPath: string,
-  rawPom: RawPomModel,
-  row: PomDependencyRow,
-  log?: (message: string) => void,
-  signal?: AbortSignal,
-  outputMode: "capture" | "passthrough" = "capture",
-): Promise<string | undefined> {
-  if (!row.propertyName || row.kind === "parent") {
-    return undefined;
-  }
-  const cloned = cloneElement(rawPom.root);
-  removePropertyDefinition(cloned, row.propertyName);
-  if (!prepareRowForProviderFallback(cloned, row)) {
-    return undefined;
-  }
-
-  const projectDir = path.dirname(pomPath);
-  const tempPomPath = path.join(projectDir, `.devtools-provider-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.pom.xml`);
-  fs.writeFileSync(tempPomPath, serializeXmlDocument(cloned), "utf8");
-  try {
-    const providerPom = await loadEffectivePom(
-      tempPomPath,
-      mvnPath,
-      { groupId: rawPom.groupId, artifactId: rawPom.artifactId },
-      log,
-      signal,
-      "capture",
-      true,
-    );
-    const providerRows = extractEffectiveRows(providerPom);
-    return providerRows.get(row.rowId)?.effectiveVersion;
+    return {
+      targets: changedTargets,
+      propertyProviderValue: normalizeResolvedVersion(extractProperties(providerPom).get(propertyName), undefined),
+    };
   } catch {
     return undefined;
   } finally {
@@ -550,6 +748,62 @@ function normalizeResolvedVersion(candidate: string | undefined, propertyValue: 
   return candidate;
 }
 
+function extractProperties(root: XmlElementNode): Map<string, string> {
+  const properties = firstChild(root, "properties");
+  const values = new Map<string, string>();
+  if (!properties) {
+    return values;
+  }
+  for (const property of childElements(properties)) {
+    values.set(localName(property.name), textContent(property));
+  }
+  return values;
+}
+
+function extractChangedTargets(
+  effectiveRows: Map<string, PomDependencyRow>,
+  providerRows: Map<string, PomDependencyRow>,
+): OverrideTarget[] {
+  const changedTargets: OverrideTarget[] = [];
+  const rowIds = [...new Set([...effectiveRows.keys(), ...providerRows.keys()])];
+  for (const rowId of rowIds) {
+    const current = effectiveRows.get(rowId);
+    const provider = providerRows.get(rowId);
+    const currentVersion = normalizeResolvedVersion(current?.effectiveVersion ?? current?.rawVersion, current?.propertyValue);
+    const providerVersion = normalizeResolvedVersion(provider?.effectiveVersion ?? provider?.rawVersion, provider?.propertyValue);
+    if (!current || current.kind === "parent" || !currentVersion || !providerVersion || currentVersion === providerVersion) {
+      continue;
+    }
+    changedTargets.push({
+      rowId,
+      kind: current.kind as Exclude<CompareRowKind, "override" | "parent">,
+      groupId: current.groupId,
+      artifactId: current.artifactId,
+      dependencyLabel: current.dependencyLabel,
+      providerVersion,
+    });
+  }
+  changedTargets.sort((left, right) => left.dependencyLabel.localeCompare(right.dependencyLabel));
+  return changedTargets;
+}
+
+function matchesPropertyTarget(propertyName: string, target: OverrideTarget): boolean {
+  const search = `${target.groupId}:${target.artifactId}`.toLowerCase();
+  const candidates = buildPropertyMatchCandidates(propertyName);
+  return candidates.some((candidate) => candidate.length >= 4 && search.includes(candidate));
+}
+
+function buildPropertyMatchCandidates(propertyName: string): string[] {
+  const stem = propertyName.replace(/(?:^|[._-])version$/i, "");
+  const rawTokens = stem.toLowerCase().split(/[._-]+/).filter(Boolean);
+  const simplifiedTokens = rawTokens.flatMap((token) => {
+    const withoutDigits = token.replace(/\d+/g, "");
+    return withoutDigits && withoutDigits !== token ? [token, withoutDigits] : [token];
+  });
+  const joined = simplifiedTokens.join("");
+  return [...new Set([...simplifiedTokens, joined])];
+}
+
 function mutatePom(pomPath: string, mutate: (root: XmlElementNode) => void): void {
   const root = parseXmlDocument(fs.readFileSync(pomPath, "utf8"));
   mutate(root);
@@ -569,37 +823,6 @@ function removePropertyDefinition(root: XmlElementNode, propertyName: string): v
   if (childElements(properties).length === 0) {
     removeChild(root, properties);
   }
-}
-
-function prepareRowForProviderFallback(root: XmlElementNode, row: PomDependencyRow): boolean {
-  const target = findRowElement(root, row);
-  if (!target) {
-    return false;
-  }
-  if (row.kind === "direct") {
-    const versionElement = firstChild(target, "version");
-    if (!versionElement) {
-      return false;
-    }
-    removeChild(target, versionElement);
-    return true;
-  }
-  if (row.kind === "managed") {
-    const dependencyManagement = firstChild(root, "dependencyManagement");
-    const dependencies = firstChild(dependencyManagement ?? root, "dependencies");
-    if (!dependencyManagement || !dependencies) {
-      return false;
-    }
-    removeChild(dependencies, target);
-    if (childElements(dependencies, "dependency").length === 0) {
-      removeChild(dependencyManagement, dependencies);
-    }
-    if (childElements(dependencyManagement).length === 0) {
-      removeChild(root, dependencyManagement);
-    }
-    return true;
-  }
-  return false;
 }
 
 function applyAdoptHighest(root: XmlElementNode, row: PomDependencyRow, version: string, sourcePropertyName?: string): void {

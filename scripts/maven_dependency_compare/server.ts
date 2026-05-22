@@ -4,7 +4,7 @@ import type net from "node:net";
 
 import { resolveExecutable } from "../../src/script-runtime.ts";
 import { enrichReport, renderReportPage } from "./lib/report-html.ts";
-import { adoptHighestVersion, analyzeProjectsForPaths, buildCompareReport, removeOverride } from "./lib/pom.ts";
+import { adoptHighestVersion, analyzeProjectsForPathsWithProgress as analyzeCompareProjectsWithProgress, buildCompareReport, removeOverride } from "./lib/pom.ts";
 import { SERVER_IDLE_TIMEOUT_MS } from "./lib/constants.ts";
 import { openInBrowser } from "./lib/open-browser.ts";
 
@@ -20,6 +20,7 @@ export interface CompareServerSession {
 
 interface StartCompareServerOptions {
   projectPaths: string[];
+  mode?: "fast" | "deep";
   signal?: AbortSignal;
   openBrowser?: boolean;
   onStarted?: (url: string) => void;
@@ -31,8 +32,9 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
     throw new Error("mvn was not found on PATH.");
   }
 
+  const probeWriter = createProbeWriter();
   let lastAccess = Date.now();
-  let report = enrichReport(buildCompareReport(await analyzeProjectsForPaths(options.projectPaths, mvnPath)));
+  let report = enrichReport(buildCompareReport(await loadReportAnalyses(options.projectPaths, mvnPath, options.mode ?? "deep", probeWriter)));
   let interval: NodeJS.Timeout | undefined;
   let resolved = false;
   let closedResolve: (() => void) | undefined;
@@ -80,7 +82,7 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
           response.end(JSON.stringify({ error: "Unknown action." }));
           return;
         }
-        report = enrichReport(buildCompareReport(await analyzeProjectsForPaths(options.projectPaths, mvnPath)));
+        report = enrichReport(buildCompareReport(await loadReportAnalyses(options.projectPaths, mvnPath, options.mode ?? "deep", probeWriter)));
         response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
         response.end(JSON.stringify(report));
         return;
@@ -160,6 +162,42 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
     url,
     close,
     closed,
+  };
+}
+
+async function loadReportAnalyses(
+  projectPaths: string[],
+  mvnPath: string,
+  mode: "fast" | "deep",
+  updateProbeLine: (message?: string) => void,
+) {
+  const analyses = await analyzeCompareProjectsWithProgress(projectPaths, mvnPath, mode, (progress) => {
+    const scope = progress.propertyCount > 0
+      ? `${progress.propertyIndex + 1}/${progress.propertyCount} ${progress.propertyName}`
+      : mode === "fast"
+        ? "provider baseline"
+        : "no version properties";
+    updateProbeLine(`[probe:${mode}] ${progress.projectIndex + 1}/${progress.projectCount} ${progress.projectName} :: ${scope}`);
+  });
+  updateProbeLine();
+  return analyses;
+}
+
+function createProbeWriter(): (message?: string) => void {
+  let active = false;
+  return (message?: string) => {
+    if (!process.stdout.isTTY) {
+      return;
+    }
+    if (!message) {
+      if (active) {
+        process.stdout.write("\r\x1b[2K");
+        active = false;
+      }
+      return;
+    }
+    active = true;
+    process.stdout.write(`\r\x1b[2K${message}`);
   };
 }
 

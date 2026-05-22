@@ -18,7 +18,7 @@ directory = "scripts"
 # width = 120
 
 # Whether script execution needs a confirmation dialog first.
-# confirm_run = true
+confirm_run = false
 
 # Optional: relative main-pane widths in percent for Scripts / Projects / Jobs.
 # They do not need to add up to exactly 100; the TUI normalizes them.

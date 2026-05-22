@@ -210,6 +210,60 @@ test("maven dependency compare sorts override rows before managed and direct row
   assert.equal(report.rows[0]?.cells[0]?.removeOverrideAvailable, true);
 });
 
+test("maven dependency compare marks missing override properties as warnings in other projects", () => {
+  const report = buildCompareReport([
+    {
+      project: {
+        name: "alpha",
+        path: "/tmp/alpha",
+        projectType: "maven",
+        marker: "pom.xml",
+        projectTypes: ["maven"],
+        identity: "alpha:/tmp/alpha",
+      },
+      pomPath: "/tmp/alpha/pom.xml",
+      rows: new Map([
+        ["override:tomcat.version", {
+          rowId: "override:tomcat.version",
+          kind: "override",
+          groupId: "__override__",
+          artifactId: "tomcat.version",
+          dependencyLabel: "$tomcat.version",
+          rawVersion: "11.0.21",
+          effectiveVersion: "11.0.21",
+          propertyName: "tomcat.version",
+          propertyValue: "11.0.21",
+          providerVersion: "10.1.54",
+          hasLocalPropertyOverride: true,
+          overrideTargets: [{
+            rowId: "managed:org.apache.tomcat.embed:tomcat-embed-core",
+            kind: "managed",
+            groupId: "org.apache.tomcat.embed",
+            artifactId: "tomcat-embed-core",
+            dependencyLabel: "org.apache.tomcat.embed:tomcat-embed-core",
+            providerVersion: "10.1.54",
+          }],
+        }],
+      ]),
+    },
+    {
+      project: {
+        name: "beta",
+        path: "/tmp/beta",
+        projectType: "maven",
+        marker: "pom.xml",
+        projectTypes: ["maven"],
+        identity: "beta:/tmp/beta",
+      },
+      pomPath: "/tmp/beta/pom.xml",
+      rows: new Map(),
+    },
+  ]);
+  const row = report.rows[0]!;
+  assert.equal(row.cells[1]?.present, false);
+  assert.equal(row.cells[1]?.isMissingOverrideWarning, true);
+});
+
 test("maven dependency compare selects the matching project from reactor effective pom output", () => {
   const root = parseXmlDocument(`
     <projects>
@@ -245,6 +299,9 @@ test("maven dependency compare report page contains interactive hooks", () => {
   assert.match(html, /remove-project-btn/);
   assert.match(html, /hideProject/);
   assert.match(html, /targetProjectPaths/);
+  assert.match(html, /property fehlt/);
+  assert.match(html, /Adopt property/);
+  assert.match(html, /Adopt properties for all/);
 });
 
 test("maven dependency compare server exposes a local url and closes cleanly", async () => {

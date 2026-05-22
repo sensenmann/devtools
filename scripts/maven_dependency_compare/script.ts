@@ -7,6 +7,7 @@ export async function mavenDependencyCompare(context: ScriptContext): Promise<Bu
   if (mvnProjects.length < 2) {
     return { success: false, message: "Maven dependency compare requires at least two selected Maven projects." };
   }
+  const mode = context.args.mode === "fast" ? "fast" : "deep";
   const mvnPath = resolveExecutable("mvn");
   if (!mvnPath) {
     return { success: false, message: "mvn was not found on PATH." };
@@ -14,6 +15,7 @@ export async function mavenDependencyCompare(context: ScriptContext): Promise<Bu
 
   const session = await startCompareServer({
     projectPaths: mvnProjects.map((project) => project.path),
+    mode,
     signal: context.signal,
     onStarted: (url) => {
       context.log?.(`[server] ${url}`);

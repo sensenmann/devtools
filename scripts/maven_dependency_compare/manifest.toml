@@ -5,3 +5,10 @@ project_types = ["maven"]
 scope = "selection"
 entry = "mavenDependencyCompare"
 group = "Dependency Alignment"
+variant_key = "mode"
+variant_values = ["fast", "deep"]
+variant_default = "deep"
+
+[variant_arg_values]
+fast = "fast"
+deep = "deep"

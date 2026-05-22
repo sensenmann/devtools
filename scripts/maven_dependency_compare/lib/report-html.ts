@@ -21,6 +21,8 @@ export function renderReportPage(): string {
       .badge { display: inline-block; border-radius: 999px; padding: 2px 7px; font-size: 12px; font-weight: 700; margin-left: 6px; }
       .badge-prop { background: #fef3c7; color: #92400e; }
       .badge-pin { background: #fee2e2; color: #991b1b; }
+      .badge-provider { background: #fef3c7; color: #92400e; }
+      .badge-warn { background: #fef3c7; color: #92400e; }
       .kind { display: inline-block; border-radius: 6px; padding: 2px 8px; background: #e2e8f0; color: #334155; font-size: 12px; font-weight: 700; }
       .kind-help { color: #64748b; font-size: .9rem; }
       .cell-actions, .row-actions { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
@@ -121,7 +123,7 @@ export function renderReportPage(): string {
           '<th><div class="project-head"><span>' + escapeHtml(project.name) + '</span><button class="remove-project-btn" title="Spalte entfernen" onclick="hideProject(' + escapeAttributeJson(project.path) + ')">×</button></div></th>'
         )).join('');
         const visibleRows = onlyDifferences
-          ? visibleReport.rows.filter((row) => row.cells.some((cell) => cell.isOutdated || cell.isPinnedBelowProvider))
+          ? visibleReport.rows.filter((row) => row.cells.some((cell) => cell.isOutdated || cell.isPinnedBelowProvider || cell.isMissingOverrideWarning))
           : visibleReport.rows;
         const rows = visibleRows.map(renderRow).join('');
         app.innerHTML = '<div class="table-responsive shadow-sm bg-white rounded border"><table class="table table-sm table-hover mb-0"><thead><tr><th class="dep-col">Dependency</th><th class="kind-col">Kind</th>' + head + '<th class="action-col">Actions</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
@@ -130,6 +132,9 @@ export function renderReportPage(): string {
       function renderRow(row) {
         const cells = row.cells.map((cell) => {
           if (!cell.present) {
+            if (cell.isMissingOverrideWarning) {
+              return '<td><span class="badge badge-warn">property fehlt</span><div class="cell-actions"><button class="btn btn-outline-primary btn-xs" onclick="postAction(\\'/api/actions/adopt-highest\\', { rowId: \\'' + row.rowId + '\\', targetProjectPath: \\'' + cell.projectPath + '\\' })">Adopt property</button></div></td>';
+            }
             return '<td><span class="not-used">nicht verwendet</span></td>';
           }
           const classes = [];
@@ -142,7 +147,9 @@ export function renderReportPage(): string {
           }
           const badges = [
             cell.hasLocalPropertyOverride ? '<span class="badge badge-prop">property</span>' : '',
-            cell.isPinnedBelowProvider && cell.providerVersion ? '<span class="badge badge-pin">bundled ' + escapeHtml(cell.providerVersion) + '</span>' : ''
+            cell.providerVersion && cell.hasDifferentProviderVersion
+              ? '<span class="badge ' + (cell.isPinnedBelowProvider ? 'badge-pin' : 'badge-provider') + '">bundled ' + escapeHtml(cell.providerVersion) + '</span>'
+              : ''
           ].join('');
           const tree = (cell.dependencyTrees || []).map(renderTree).join('');
           const buttonParts = [];
@@ -163,9 +170,15 @@ export function renderReportPage(): string {
         }).join('');
         const hasOutdatedTarget = row.cells.some((cell) => cell.adoptHighestAvailable);
         const hasRemovableOverride = row.cells.some((cell) => cell.removeOverrideAvailable);
+        const missingPropertyTargets = row.kind === 'override'
+          ? row.cells.filter((cell) => cell.isMissingOverrideWarning).map((cell) => cell.projectPath)
+          : [];
         const rowActionParts = [];
         if (hasOutdatedTarget) {
           rowActionParts.push('<button class="btn btn-primary btn-xs" onclick="postAction(\\'/api/actions/adopt-highest\\', { rowId: \\'' + row.rowId + '\\', targetProjectPaths: ' + JSON.stringify(row.cells.filter((cell) => cell.adoptHighestAvailable).map((cell) => cell.projectPath)) + ' })">Adopt highest for all</button>');
+        }
+        if (missingPropertyTargets.length > 0) {
+          rowActionParts.push('<button class="btn btn-primary btn-xs" onclick="postAction(\\'/api/actions/adopt-highest\\', { rowId: \\'' + row.rowId + '\\', targetProjectPaths: ' + JSON.stringify(missingPropertyTargets) + ' })">Adopt properties for all</button>');
         }
         if (hasRemovableOverride) {
           rowActionParts.push('<button class="btn btn-secondary btn-xs" onclick="postAction(\\'/api/actions/remove-override\\', { rowId: \\'' + row.rowId + '\\', targetProjectPaths: ' + JSON.stringify(row.cells.filter((cell) => cell.removeOverrideAvailable).map((cell) => cell.projectPath)) + ' })">Remove override for all</button>');
@@ -189,6 +202,7 @@ export function renderReportPage(): string {
                 ...cell,
                 isHighest,
                 isOutdated,
+                isMissingOverrideWarning: Boolean(row.kind === 'override' && !cell.present),
                 adoptHighestAvailable: Boolean(cell.present && highestVersion && effectiveVersion && compareVersionsLite(effectiveVersion, highestVersion) < 0),
               };
             });
