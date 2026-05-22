@@ -30,6 +30,7 @@ export interface PomDependencyRow {
   propertyName?: string;
   propertyValue?: string;
   providerVersion?: string;
+  availableUpdateVersion?: string;
   hasLocalPropertyOverride: boolean;
   overrideTargets?: OverrideTarget[];
 }
@@ -50,6 +51,7 @@ export interface ReportCell extends PomDependencyRow {
   isOutdated: boolean;
   isPinnedBelowProvider: boolean;
   hasDifferentProviderVersion: boolean;
+  showAvailableUpdateVersion: boolean;
   removeOverrideAvailable: boolean;
   adoptHighestAvailable: boolean;
 }
@@ -59,6 +61,7 @@ export interface ReportRow {
   kind: CompareRowKind;
   label: string;
   highestVersion?: string;
+  availableUpdateVersion?: string;
   cells: ReportCell[];
 }
 
@@ -80,15 +83,24 @@ interface RawPomModel {
 interface PropertyProbeResult {
   targets: OverrideTarget[];
   propertyProviderValue?: string;
+  forceRow?: boolean;
 }
 
 interface ProbeProgress {
+  stage?: "property" | "update";
   projectName: string;
   projectIndex: number;
   projectCount: number;
   propertyName: string;
   propertyIndex: number;
   propertyCount: number;
+}
+
+interface DependencyUpdateEntry {
+  kind: "direct" | "managed";
+  groupId: string;
+  artifactId: string;
+  availableVersion: string;
 }
 
 export async function analyzeProjects(
@@ -120,6 +132,15 @@ export function buildCompareReport(analyses: ProjectPomAnalysis[]): CompareRepor
         .map((row) => normalizeResolvedVersion(row?.effectiveVersion, row?.propertyValue))
         .filter((value): value is string => Boolean(value)),
     );
+    const availableUpdateVersion = maxVersion(
+      rowStates
+        .map((row) => row?.availableUpdateVersion)
+        .filter((value): value is string => Boolean(value)),
+    );
+    const showAvailableUpdateVersion = Boolean(
+      availableUpdateVersion &&
+      (!highestVersion || compareVersions(availableUpdateVersion, highestVersion) > 0)
+    ) ? availableUpdateVersion : undefined;
     const template = rowStates.find(Boolean);
     const cells = analyses.map((analysis) => {
       const row = analysis.rows.get(rowId);
@@ -151,6 +172,7 @@ export function buildCompareReport(analyses: ProjectPomAnalysis[]): CompareRepor
         propertyName: row?.propertyName,
         propertyValue: row?.propertyValue,
         providerVersion,
+        availableUpdateVersion: showAvailableUpdateVersion,
         hasLocalPropertyOverride: row?.hasLocalPropertyOverride ?? false,
         projectPath: analysis.project.path,
         projectName: analysis.project.name,
@@ -161,6 +183,7 @@ export function buildCompareReport(analyses: ProjectPomAnalysis[]): CompareRepor
         isOutdated,
         isPinnedBelowProvider,
         hasDifferentProviderVersion,
+        showAvailableUpdateVersion: Boolean(row && showAvailableUpdateVersion),
         removeOverrideAvailable: Boolean(
           row?.hasLocalPropertyOverride &&
           row.providerVersion,
@@ -173,6 +196,7 @@ export function buildCompareReport(analyses: ProjectPomAnalysis[]): CompareRepor
       kind: template?.kind ?? "direct",
       label: buildReportLabel(rowStates, template, rowId),
       highestVersion,
+      availableUpdateVersion: showAvailableUpdateVersion,
       cells,
     };
   });
@@ -309,6 +333,22 @@ async function analyzeProject(
     projectCount: progress?.projectCount ?? 1,
     onProbeProgress: progress?.onProbeProgress,
   });
+  const availableUpdates = mode === "deep"
+    ? await resolveAvailableUpdates(
+      pomPath,
+      mvnPath,
+      rawPom,
+      log,
+      signal,
+      outputMode,
+      {
+        projectName: project.name,
+        projectIndex: progress?.projectIndex ?? 0,
+        projectCount: progress?.projectCount ?? 1,
+        onProbeProgress: progress?.onProbeProgress,
+      },
+    )
+    : new Map<string, string>();
 
   const rows = new Map<string, PomDependencyRow>();
   for (const [rowId, row] of rawPom.rows.entries()) {
@@ -320,9 +360,16 @@ async function analyzeProject(
       ...row,
       effectiveVersion: normalizeResolvedVersion(effectiveRow?.effectiveVersion ?? row.rawVersion, row.propertyValue),
       providerVersion: normalizeResolvedVersion(providerVersion, undefined),
+      availableUpdateVersion: availableUpdates.get(rowId),
     });
   }
-  for (const overrideRow of buildOverrideRows(rawPom, propertyProbeCache)) {
+  for (const overrideRow of buildOverrideRows(rawPom, propertyProbeCache, mode)) {
+    overrideRow.availableUpdateVersion = availableUpdates.get(overrideRow.rowId)
+      ?? maxVersion(
+        (overrideRow.overrideTargets ?? [])
+          .map((target) => availableUpdates.get(target.rowId))
+          .filter((value): value is string => Boolean(value)),
+      );
     rows.set(overrideRow.rowId, overrideRow);
   }
 
@@ -463,27 +510,21 @@ async function loadEffectivePom(
 function buildOverrideRows(
   rawPom: RawPomModel,
   propertyProbeCache: Map<string, PropertyProbeResult>,
+  mode: "fast" | "deep",
 ): PomDependencyRow[] {
   const overrideRows: PomDependencyRow[] = [];
   for (const [propertyName, propertyValue] of rawPom.localProperties.entries()) {
     const propertyProbe = propertyProbeCache.get(propertyName);
-    if (!propertyProbe) {
+    if (!propertyProbe && !(mode === "fast" && isVersionLikeProperty(propertyName) && !isDirectlyReferencedProperty(rawPom, propertyName))) {
       continue;
     }
-    if (!propertyProbe.propertyProviderValue && propertyProbe.targets.length === 0) {
-      continue;
-    }
-    if (
-      propertyProbe.targets.length > 0 &&
-      !propertyProbe.propertyProviderValue &&
-      !propertyProbe.targets.some((target) => rawPom.rows.get(target.rowId)?.propertyName !== propertyName)
-    ) {
+    if (propertyProbe && !propertyProbe.forceRow && !propertyProbe.propertyProviderValue && propertyProbe.targets.length === 0) {
       continue;
     }
     const providerVersion = maxVersion(
       [
-        propertyProbe.propertyProviderValue,
-        ...propertyProbe.targets
+        propertyProbe?.propertyProviderValue,
+        ...(propertyProbe?.targets ?? [])
         .map((target) => normalizeResolvedVersion(target.providerVersion, undefined))
         .filter((value): value is string => Boolean(value)),
       ],
@@ -493,14 +534,14 @@ function buildOverrideRows(
       kind: "override",
       groupId: "__override__",
       artifactId: propertyName,
-      dependencyLabel: buildOverrideLabel(propertyName, propertyProbe.targets),
+      dependencyLabel: buildOverrideLabel(propertyName, propertyProbe?.targets ?? []),
       rawVersion: propertyValue,
       effectiveVersion: propertyValue,
       propertyName,
       propertyValue,
       providerVersion,
       hasLocalPropertyOverride: true,
-      overrideTargets: propertyProbe.targets,
+      overrideTargets: propertyProbe?.targets ?? [],
     });
   }
   return overrideRows;
@@ -525,11 +566,13 @@ async function buildPropertyProbeCache(
   const cache = new Map<string, PropertyProbeResult>();
   const propertyNames = [...rawPom.localProperties.keys()].filter(isVersionLikeProperty);
   if (mode === "fast") {
+    const removablePropertyNames = propertyNames.filter((propertyName) => !isDirectlyReferencedProperty(rawPom, propertyName));
     const baseline = await resolveAllVersionPropertiesBaseline(
       pomPath,
       mvnPath,
       rawPom,
       effectiveRows,
+      removablePropertyNames,
       log,
       signal,
       outputMode,
@@ -569,6 +612,52 @@ async function buildPropertyProbeCache(
   return cache;
 }
 
+async function resolveAvailableUpdates(
+  pomPath: string,
+  mvnPath: string,
+  rawPom: RawPomModel,
+  log?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+  progress?: {
+    projectName: string;
+    projectIndex: number;
+    projectCount: number;
+    onProbeProgress?: (progress: ProbeProgress) => void;
+  },
+): Promise<Map<string, string>> {
+  const availableUpdates = new Map<string, string>();
+  const dependencyUpdates = await resolveDependencyUpdates(
+    pomPath,
+    mvnPath,
+    log,
+    signal,
+    outputMode,
+    progress,
+  );
+  for (const update of dependencyUpdates) {
+    availableUpdates.set(`${update.kind}:${update.groupId}:${update.artifactId}`, update.availableVersion);
+  }
+
+  const propertyNames = [...rawPom.localProperties.keys()].filter(isVersionLikeProperty);
+  if (propertyNames.length === 0) {
+    return availableUpdates;
+  }
+  const propertyUpdates = await resolvePropertyUpdates(
+    pomPath,
+    mvnPath,
+    propertyNames,
+    log,
+    signal,
+    outputMode,
+    progress,
+  );
+  for (const [propertyName, availableVersion] of propertyUpdates.entries()) {
+    availableUpdates.set(`override:${propertyName}`, availableVersion);
+  }
+  return availableUpdates;
+}
+
 interface FastBaseline {
   providerRows: Map<string, PomDependencyRow>;
   providerProperties: Map<string, string>;
@@ -580,6 +669,7 @@ async function resolveAllVersionPropertiesBaseline(
   mvnPath: string,
   rawPom: RawPomModel,
   effectiveRows: Map<string, PomDependencyRow>,
+  removablePropertyNames: string[],
   log?: (message: string) => void,
   signal?: AbortSignal,
   outputMode: "capture" | "passthrough" = "capture",
@@ -599,7 +689,7 @@ async function resolveAllVersionPropertiesBaseline(
     propertyCount: 0,
   });
   const cloned = cloneElement(rawPom.root);
-  for (const propertyName of [...rawPom.localProperties.keys()].filter(isVersionLikeProperty)) {
+  for (const propertyName of removablePropertyNames) {
     removePropertyDefinition(cloned, propertyName);
   }
   const projectDir = path.dirname(pomPath);
@@ -658,16 +748,230 @@ function buildFastPropertyProbe(
   const propertyChanged = Boolean(providerPropertyValue && currentPropertyValue && providerPropertyValue !== currentPropertyValue);
 
   if (!propertyChanged && inferredTargets.length === 0) {
-    return undefined;
+    return {
+      targets: [],
+      forceRow: !isDirectlyReferencedProperty(rawPom, propertyName),
+    };
   }
   return {
     targets: inferredTargets,
     propertyProviderValue: propertyChanged ? providerPropertyValue : undefined,
+    forceRow: !isDirectlyReferencedProperty(rawPom, propertyName),
   };
+}
+
+const VERSIONS_PLUGIN_CANDIDATE_VERSIONS = ["2.21.0", "2.19.1", "2.18.0", "2.17.1", "2.7"];
+const IGNORED_UPDATE_VERSION_PATTERNS = [
+  "(?i).*[._-]alpha\\d*.*",
+  "(?i).*[._-]beta\\d*.*",
+  "(?i).*[._-]milestone\\d*.*",
+  "(?i).*[._-]m\\d+.*",
+  "(?i).*[._-]rc\\d*.*",
+  "(?i).*[._-]cr\\d*.*",
+  "(?i).*[._-]ea\\d*.*",
+  "(?i).*[._-]preview\\d*.*",
+  ".*-SNAPSHOT",
+].join(",");
+
+function resolveVersionsPluginCoordinate(): string {
+  const m2Repository = path.join(os.homedir(), ".m2", "repository", "org", "codehaus", "mojo", "versions-maven-plugin");
+  for (const version of VERSIONS_PLUGIN_CANDIDATE_VERSIONS) {
+    const directory = path.join(m2Repository, version);
+    if (
+      fs.existsSync(path.join(directory, `versions-maven-plugin-${version}.jar`)) &&
+      fs.existsSync(path.join(directory, `versions-maven-plugin-${version}.pom`))
+    ) {
+      return `org.codehaus.mojo:versions-maven-plugin:${version}`;
+    }
+  }
+  return "org.codehaus.mojo:versions-maven-plugin:2.21.0";
+}
+
+async function resolveDependencyUpdates(
+  pomPath: string,
+  mvnPath: string,
+  log?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+  progress?: {
+    projectName: string;
+    projectIndex: number;
+    projectCount: number;
+    onProbeProgress?: (progress: ProbeProgress) => void;
+  },
+): Promise<DependencyUpdateEntry[]> {
+  if (progress?.onProbeProgress) {
+    progress.onProbeProgress({
+      stage: "update",
+      projectName: progress.projectName,
+      projectIndex: progress.projectIndex,
+      projectCount: progress.projectCount,
+      propertyName: "dependency updates",
+      propertyIndex: 0,
+      propertyCount: 2,
+    });
+  }
+  const output = await runVersionsDisplayGoal(
+    pomPath,
+    mvnPath,
+    `${resolveVersionsPluginCoordinate()}:display-dependency-updates`,
+    [
+      "-DprocessDependencyManagement=true",
+      "-DallowMajorUpdates=true",
+      "-DallowMinorUpdates=true",
+      "-DallowIncrementalUpdates=true",
+      "-DallowSnapshots=false",
+      `-Dmaven.version.ignore=${IGNORED_UPDATE_VERSION_PATTERNS}`,
+    ],
+    log,
+    signal,
+    outputMode,
+  );
+  return parseDependencyUpdatesOutput(output);
+}
+
+async function resolvePropertyUpdates(
+  pomPath: string,
+  mvnPath: string,
+  propertyNames: string[],
+  log?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+  progress?: {
+    projectName: string;
+    projectIndex: number;
+    projectCount: number;
+    onProbeProgress?: (progress: ProbeProgress) => void;
+  },
+): Promise<Map<string, string>> {
+  if (progress?.onProbeProgress) {
+    progress.onProbeProgress({
+      stage: "update",
+      projectName: progress.projectName,
+      projectIndex: progress.projectIndex,
+      projectCount: progress.projectCount,
+      propertyName: "property updates",
+      propertyIndex: 1,
+      propertyCount: 2,
+    });
+  }
+  const output = await runVersionsDisplayGoal(
+    pomPath,
+    mvnPath,
+    `${resolveVersionsPluginCoordinate()}:display-property-updates`,
+    [
+      `-DincludeProperties=${propertyNames.join(",")}`,
+      "-DallowMajorUpdates=true",
+      "-DallowMinorUpdates=true",
+      "-DallowIncrementalUpdates=true",
+      "-DallowSnapshots=false",
+      `-Dmaven.version.ignore=${IGNORED_UPDATE_VERSION_PATTERNS}`,
+      "-DincludeParent=false",
+    ],
+    log,
+    signal,
+    outputMode,
+  );
+  return parsePropertyUpdatesOutput(output);
+}
+
+async function runVersionsDisplayGoal(
+  pomPath: string,
+  mvnPath: string,
+  goal: string,
+  extraArgs: string[],
+  log?: (message: string) => void,
+  signal?: AbortSignal,
+  outputMode: "capture" | "passthrough" = "capture",
+): Promise<string> {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-versions-report-"));
+  const outputPath = path.join(tempDir, "updates.txt");
+  try {
+    const result = await runSingleCommand(
+      path.dirname(pomPath),
+      [
+        mvnPath,
+        "-q",
+        "-f",
+        pomPath,
+        goal,
+        `-Dversions.outputFile=${outputPath}`,
+        "-Dversions.logOutput=false",
+        "-Dversions.outputLineWidth=1000",
+        ...extraArgs,
+      ],
+      "maven versions report",
+      log,
+      signal,
+      outputMode,
+      true,
+    );
+    if (!result.success || !fs.existsSync(outputPath)) {
+      return "";
+    }
+    return fs.readFileSync(outputPath, "utf8");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function parseDependencyUpdatesOutput(text: string): DependencyUpdateEntry[] {
+  const updates: DependencyUpdateEntry[] = [];
+  let section: "direct" | "managed" = "direct";
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/^\[INFO\]\s?/, "").trimEnd();
+    if (/The following dependencies in Dependency Management have newer versions:/i.test(line)) {
+      section = "managed";
+      continue;
+    }
+    if (/The following dependency updates are available:/i.test(line) || /The following dependencies(?: in Dependencies)? have newer versions:/i.test(line)) {
+      section = "direct";
+      continue;
+    }
+    const match = line.match(/^\s*([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)\s+\.+\s+(\S+)\s+->\s+(\S+)\s*$/);
+    if (!match) {
+      continue;
+    }
+    if (!isStableUpdateVersion(match[4])) {
+      continue;
+    }
+    updates.push({
+      kind: section,
+      groupId: match[1],
+      artifactId: match[2],
+      availableVersion: match[4],
+    });
+  }
+  return updates;
+}
+
+function parsePropertyUpdatesOutput(text: string): Map<string, string> {
+  const updates = new Map<string, string>();
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/^\[INFO\]\s?/, "").trimEnd();
+    const match = line.match(/^\s*\$\{([^}]+)\}\s+\.+\s+(\S+)\s+->\s+(\S+)\s*$/);
+    if (!match) {
+      continue;
+    }
+    if (!isStableUpdateVersion(match[3])) {
+      continue;
+    }
+    updates.set(match[1], match[3]);
+  }
+  return updates;
+}
+
+function isStableUpdateVersion(version: string): boolean {
+  return !/[._-](?:alpha|beta|milestone|m\d+|rc|cr|ea|preview)\d*/i.test(version) &&
+    !/-SNAPSHOT/i.test(version);
 }
 
 function isVersionLikeProperty(propertyName: string): boolean {
   return /(?:^|[._-])version$/i.test(propertyName);
+}
+
+function isDirectlyReferencedProperty(rawPom: RawPomModel, propertyName: string): boolean {
+  return [...rawPom.rows.values()].some((row) => row.propertyName === propertyName);
 }
 
 async function resolvePropertyOverrideRows(

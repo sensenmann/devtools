@@ -17,12 +17,15 @@ export function renderReportPage(): string {
       td.cell-highest { background: #ecfdf5 !important; }
       td.cell-outdated, td.cell-pinned { background: #fef2f2 !important; }
       .version { font-weight: 700; }
+      .version-link, .dependency-link { color: inherit; text-decoration: none; }
+      .version-link:hover, .version-link:focus, .dependency-link:hover, .dependency-link:focus { color: inherit; text-decoration: underline; }
       .muted { color: #94a3b8; }
       .badge { display: inline-block; border-radius: 999px; padding: 2px 7px; font-size: 12px; font-weight: 700; margin-left: 6px; }
       .badge-prop { background: #fef3c7; color: #92400e; }
       .badge-pin { background: #fee2e2; color: #991b1b; }
       .badge-provider { background: #fef3c7; color: #92400e; }
       .badge-warn { background: #fef3c7; color: #92400e; }
+      .badge-update { background: #dbeafe; color: #1d4ed8; }
       .kind { display: inline-block; border-radius: 6px; padding: 2px 8px; background: #e2e8f0; color: #334155; font-size: 12px; font-weight: 700; }
       .kind-help { color: #64748b; font-size: .9rem; }
       .cell-actions, .row-actions { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
@@ -50,9 +53,15 @@ export function renderReportPage(): string {
           <h1 class="h3 mb-1">Maven Dependency Compare</h1>
           <p class="text-secondary mb-0" id="meta">Loading…</p>
         </div>
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="showOnlyDifferences" />
-          <label class="form-check-label" for="showOnlyDifferences">Show only differences</label>
+        <div class="d-flex flex-column align-items-start gap-2">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="showOnlyDifferences" />
+            <label class="form-check-label" for="showOnlyDifferences">Show only differences</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="hideVersionUpdates" />
+            <label class="form-check-label" for="hideVersionUpdates">Hide Version Updates</label>
+          </div>
         </div>
       </div>
       <p class="kind-help mb-3">
@@ -78,6 +87,8 @@ export function renderReportPage(): string {
             </div>
           </div>
           <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary d-none" data-bs-dismiss="modal" id="statusModalContinue">Continue</button>
+            <button type="button" class="btn btn-primary d-none" id="statusModalReload">Reload all Projects</button>
             <button type="button" class="btn btn-primary" data-bs-dismiss="modal" id="statusModalClose">Close</button>
           </div>
         </div>
@@ -105,12 +116,33 @@ export function renderReportPage(): string {
         });
         const next = await response.json();
         if (!response.ok) {
-          showStatusModal(next.error || 'Action failed.', 'Action failed', false);
+          showStatusModal(next.error || 'Action failed.', 'Action failed', false, 'close');
           return;
         }
-        report = next;
+        report = next.report;
         render();
-        showStatusModal('Updated.', 'Done', false);
+        if (next.partialUpdate) {
+          showStatusModal('Done. The affected project columns were refreshed. Reload all projects for a full re-check, or continue with the partial update.', 'Done', false, 'reload');
+          return;
+        }
+        showStatusModal('Done.', 'Done', false, 'close');
+      }
+
+      async function reloadAllProjects() {
+        showStatusModal('Reloading all projects…', 'Working', true);
+        const response = await fetch('/api/actions/reload-all', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        const next = await response.json();
+        if (!response.ok) {
+          showStatusModal(next.error || 'Reload failed.', 'Reload failed', false, 'close');
+          return;
+        }
+        report = next.report;
+        render();
+        showStatusModal('All projects reloaded.', 'Done', false, 'close');
       }
 
       function render() {
@@ -118,6 +150,7 @@ export function renderReportPage(): string {
         meta.textContent = 'Generated at ' + report.generatedAt;
         const app = document.getElementById('app');
         const onlyDifferences = document.getElementById('showOnlyDifferences').checked;
+        const hideVersionUpdates = document.getElementById('hideVersionUpdates').checked;
         const visibleReport = deriveVisibleReport(report, hiddenProjects);
         const head = visibleReport.projects.map((project) => (
           '<th><div class="project-head"><span>' + escapeHtml(project.name) + '</span><button class="remove-project-btn" title="Spalte entfernen" onclick="hideProject(' + escapeAttributeJson(project.path) + ')">×</button></div></th>'
@@ -147,8 +180,11 @@ export function renderReportPage(): string {
           }
           const badges = [
             cell.hasLocalPropertyOverride ? '<span class="badge badge-prop">property</span>' : '',
+            cell.showAvailableUpdateVersion && !hideVersionUpdates && cell.availableUpdateVersion
+              ? '<span class="badge badge-update">update ' + renderVersionLink(row, cell, cell.availableUpdateVersion) + '</span>'
+              : '',
             cell.providerVersion && cell.hasDifferentProviderVersion
-              ? '<span class="badge ' + (cell.isPinnedBelowProvider ? 'badge-pin' : 'badge-provider') + '">bundled ' + escapeHtml(cell.providerVersion) + '</span>'
+              ? '<span class="badge ' + (cell.isPinnedBelowProvider ? 'badge-pin' : 'badge-provider') + '">bundled ' + renderVersionLink(row, cell, cell.providerVersion) + '</span>'
               : ''
           ].join('');
           const tree = (cell.dependencyTrees || []).map(renderTree).join('');
@@ -164,7 +200,7 @@ export function renderReportPage(): string {
           const versionClass = implicit ? 'version version-implicit' : 'version';
           const versionTitle = implicit ? ' title="Version nicht explizit in pom.xml festgelegt"' : '';
           const versionMarkup = cell.displayVersion || cell.effectiveVersion || cell.rawVersion
-            ? '<div class="' + versionClass + '"' + versionTitle + '>' + escapeHtml(cell.displayVersion || cell.effectiveVersion || cell.rawVersion || '') + badges + '</div>'
+            ? '<div class="' + versionClass + '"' + versionTitle + '>' + renderVersionLink(row, cell, cell.displayVersion || cell.effectiveVersion || cell.rawVersion || '') + badges + '</div>'
             : '<div class="version-unresolved" title="Version konnte nicht aufgelöst werden">unbekannt</div>';
           return '<td class="' + classes.join(' ') + '">' + versionMarkup + tree + buttons + '</td>';
         }).join('');
@@ -184,7 +220,7 @@ export function renderReportPage(): string {
           rowActionParts.push('<button class="btn btn-secondary btn-xs" onclick="postAction(\\'/api/actions/remove-override\\', { rowId: \\'' + row.rowId + '\\', targetProjectPaths: ' + JSON.stringify(row.cells.filter((cell) => cell.removeOverrideAvailable).map((cell) => cell.projectPath)) + ' })">Remove override for all</button>');
         }
         const rowActions = rowActionParts.length > 0 ? '<div class="row-actions">' + rowActionParts.join('') + '</div>' : '';
-        return '<tr><td class="dep-col">' + escapeHtml(row.label) + '</td><td class="kind-col"><span class="kind">' + escapeHtml(row.kindLabel) + '</span></td>' + cells + '<td class="action-col">' + rowActions + '</td></tr>';
+        return '<tr><td class="dep-col">' + renderDependencyLink(row) + '</td><td class="kind-col"><span class="kind">' + escapeHtml(row.kindLabel) + '</span></td>' + cells + '<td class="action-col">' + rowActions + '</td></tr>';
       }
 
       function deriveVisibleReport(sourceReport, hidden) {
@@ -204,6 +240,7 @@ export function renderReportPage(): string {
                 isOutdated,
                 isMissingOverrideWarning: Boolean(row.kind === 'override' && !cell.present),
                 adoptHighestAvailable: Boolean(cell.present && highestVersion && effectiveVersion && compareVersionsLite(effectiveVersion, highestVersion) < 0),
+                showAvailableUpdateVersion: Boolean(cell.present && row.availableUpdateVersion),
               };
             });
             return {
@@ -269,6 +306,26 @@ export function renderReportPage(): string {
         return '<div class="tree">' + rendered + '</div>';
       }
 
+      function renderVersionLink(row, cell, version) {
+        if (row.kind === 'override' || !cell.groupId || !cell.artifactId || !version) {
+          return escapeHtml(version || '');
+        }
+        const href = 'https://mvnrepository.com/artifact/' + encodeURIComponent(cell.groupId) + '/' + encodeURIComponent(cell.artifactId) + '/' + encodeURIComponent(version);
+        return '<a class="version-link" href="' + href + '" target="_blank" rel="noreferrer noopener">' + escapeHtml(version) + '</a>';
+      }
+
+      function renderDependencyLink(row) {
+        if (row.kind === 'override' || !row.cells.length) {
+          return escapeHtml(row.label);
+        }
+        const sourceCell = row.cells.find((cell) => cell.groupId && cell.artifactId);
+        if (!sourceCell || !sourceCell.groupId || !sourceCell.artifactId) {
+          return escapeHtml(row.label);
+        }
+        const href = 'https://mvnrepository.com/artifact/' + encodeURIComponent(sourceCell.groupId) + '/' + encodeURIComponent(sourceCell.artifactId);
+        return '<a class="dependency-link" href="' + href + '" target="_blank" rel="noreferrer noopener">' + escapeHtml(row.label) + '</a>';
+      }
+
       function escapeHtml(value) {
         return String(value)
           .replace(/&/g, '&amp;')
@@ -282,11 +339,14 @@ export function renderReportPage(): string {
         return JSON.stringify(String(value)).replace(/"/g, '&quot;');
       }
 
-      function showStatusModal(message, title, loading) {
+      function showStatusModal(message, title, loading, mode) {
         document.getElementById('statusModalTitle').textContent = title;
         document.getElementById('statusModalMessage').textContent = message;
         document.getElementById('statusModalLoading').querySelector('.spinner-border').classList.toggle('d-none', !loading);
+        document.getElementById('statusModalReload').classList.toggle('d-none', mode !== 'reload');
+        document.getElementById('statusModalContinue').classList.toggle('d-none', mode !== 'reload');
         document.getElementById('statusModalClose').classList.toggle('d-none', loading);
+        document.getElementById('statusModalClose').classList.toggle('d-none', mode === 'reload');
         if (!statusModal) {
           statusModal = new bootstrap.Modal(document.getElementById('statusModal'));
         }
@@ -294,8 +354,12 @@ export function renderReportPage(): string {
       }
 
       document.getElementById('showOnlyDifferences').addEventListener('change', () => render());
+      document.getElementById('hideVersionUpdates').addEventListener('change', () => render());
+      document.getElementById('statusModalReload').addEventListener('click', () => {
+        void reloadAllProjects();
+      });
       fetchReport().catch((error) => {
-        showStatusModal(error instanceof Error ? error.message : String(error), 'Load failed', false);
+        showStatusModal(error instanceof Error ? error.message : String(error), 'Load failed', false, 'close');
       });
     </script>
   </body>

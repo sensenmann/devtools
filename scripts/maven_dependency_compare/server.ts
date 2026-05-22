@@ -4,7 +4,7 @@ import type net from "node:net";
 
 import { resolveExecutable } from "../../src/script-runtime.ts";
 import { enrichReport, renderReportPage } from "./lib/report-html.ts";
-import { adoptHighestVersion, analyzeProjectsForPathsWithProgress as analyzeCompareProjectsWithProgress, buildCompareReport, removeOverride } from "./lib/pom.ts";
+import { adoptHighestVersion, analyzeProjects, analyzeProjectsForPathsWithProgress as analyzeCompareProjectsWithProgress, buildCompareReport, removeOverride, type ProjectPomAnalysis } from "./lib/pom.ts";
 import { SERVER_IDLE_TIMEOUT_MS } from "./lib/constants.ts";
 import { openInBrowser } from "./lib/open-browser.ts";
 
@@ -34,7 +34,9 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
 
   const probeWriter = createProbeWriter();
   let lastAccess = Date.now();
-  let report = enrichReport(buildCompareReport(await loadReportAnalyses(options.projectPaths, mvnPath, options.mode ?? "deep", probeWriter)));
+  const mode = options.mode ?? "deep";
+  let analyses = await loadReportAnalyses(options.projectPaths, mvnPath, mode, probeWriter);
+  let report = enrichReport(buildCompareReport(analyses));
   let interval: NodeJS.Timeout | undefined;
   let resolved = false;
   let closedResolve: (() => void) | undefined;
@@ -58,6 +60,7 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
       }
       if (request.method === "POST" && request.url?.startsWith("/api/actions/")) {
         const body = await readJsonBody(request);
+        let changedProjectPaths: string[] = [];
         if (request.url === "/api/actions/adopt-highest") {
           const row = report.rows.find((entry) => entry.rowId === body.rowId);
           const source = row?.cells.find((cell) => cell.isHighest && cell.present);
@@ -68,6 +71,7 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
             ? (row?.cells.filter((cell) => cell.present && cell.projectPath !== source?.projectPath).map((cell) => cell.projectPath) ?? [])
             : body.targetProjectPath ? [String(body.targetProjectPath)] : [];
           await adoptHighestVersion(String(body.rowId), source?.projectPath, targets, mvnPath);
+          changedProjectPaths = targets;
         } else if (request.url === "/api/actions/remove-override") {
           const row = report.rows.find((entry) => entry.rowId === body.rowId);
           const explicitTargets = Array.isArray(body.targetProjectPaths) ? body.targetProjectPaths.map(String) : [];
@@ -77,14 +81,32 @@ export async function startCompareServer(options: StartCompareServerOptions): Pr
             ? (row?.cells.filter((cell) => cell.removeOverrideAvailable).map((cell) => cell.projectPath) ?? [])
             : body.targetProjectPath ? [String(body.targetProjectPath)] : [];
           await removeOverride(String(body.rowId), targets, mvnPath);
+          changedProjectPaths = targets;
+        } else if (request.url === "/api/actions/reload-all") {
+          analyses = await loadReportAnalyses(options.projectPaths, mvnPath, mode, probeWriter);
+          report = enrichReport(buildCompareReport(analyses));
+          response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+          response.end(JSON.stringify({
+            report,
+            partialUpdate: false,
+            changedProjectPaths: options.projectPaths,
+          }));
+          return;
         } else {
           response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
           response.end(JSON.stringify({ error: "Unknown action." }));
           return;
         }
-        report = enrichReport(buildCompareReport(await loadReportAnalyses(options.projectPaths, mvnPath, options.mode ?? "deep", probeWriter)));
+        if (changedProjectPaths.length > 0) {
+          analyses = await refreshChangedProjects(analyses, changedProjectPaths, mvnPath, mode, probeWriter);
+          report = enrichReport(buildCompareReport(analyses));
+        }
         response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-        response.end(JSON.stringify(report));
+        response.end(JSON.stringify({
+          report,
+          partialUpdate: true,
+          changedProjectPaths,
+        }));
         return;
       }
       response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
@@ -172,7 +194,9 @@ async function loadReportAnalyses(
   updateProbeLine: (message?: string) => void,
 ) {
   const analyses = await analyzeCompareProjectsWithProgress(projectPaths, mvnPath, mode, (progress) => {
-    const scope = progress.propertyCount > 0
+    const scope = progress.stage === "update"
+      ? progress.propertyName
+      : progress.propertyCount > 0
       ? `${progress.propertyIndex + 1}/${progress.propertyCount} ${progress.propertyName}`
       : mode === "fast"
         ? "provider baseline"
@@ -181,6 +205,35 @@ async function loadReportAnalyses(
   });
   updateProbeLine();
   return analyses;
+}
+
+async function refreshChangedProjects(
+  currentAnalyses: ProjectPomAnalysis[],
+  changedProjectPaths: string[],
+  mvnPath: string,
+  mode: "fast" | "deep",
+  updateProbeLine: (message?: string) => void,
+): Promise<ProjectPomAnalysis[]> {
+  const changedPaths = [...new Set(changedProjectPaths)];
+  const changedProjects = currentAnalyses
+    .map((analysis) => analysis.project)
+    .filter((project) => changedPaths.includes(project.path));
+  if (changedProjects.length === 0) {
+    return currentAnalyses;
+  }
+  const refreshed = await analyzeProjects(changedProjects, mvnPath, mode, undefined, undefined, "capture", (progress) => {
+    const scope = progress.stage === "update"
+      ? progress.propertyName
+      : progress.propertyCount > 0
+        ? `${progress.propertyIndex + 1}/${progress.propertyCount} ${progress.propertyName}`
+        : mode === "fast"
+          ? "provider baseline"
+          : "no version properties";
+    updateProbeLine(`[refresh:${mode}] ${progress.projectIndex + 1}/${progress.projectCount} ${progress.projectName} :: ${scope}`);
+  });
+  updateProbeLine();
+  const refreshedByPath = new Map(refreshed.map((analysis) => [analysis.project.path, analysis]));
+  return currentAnalyses.map((analysis) => refreshedByPath.get(analysis.project.path) ?? analysis);
 }
 
 function createProbeWriter(): (message?: string) => void {
