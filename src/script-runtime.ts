@@ -87,6 +87,7 @@ export async function runSingleCommand(
   log?: (message: string) => void,
   signal?: AbortSignal,
   outputMode: "capture" | "passthrough" = "capture",
+  quiet = false,
 ): Promise<BuiltinScriptResponse> {
   if (signal?.aborted) {
     return {
@@ -95,12 +96,14 @@ export async function runSingleCommand(
     };
   }
   log?.(`[cmd] global :: ${command.join(" ")}`);
-  process.stdout.write(`Running: ${command.join(" ")}\n`);
+  if (!quiet) {
+    process.stdout.write(`Running: ${command.join(" ")}\n`);
+  }
   const result = await spawnCommand(cwd, command, signal, outputMode);
-  if (result.stdout.trim()) {
+  if (!quiet && result.stdout.trim()) {
     process.stdout.write(`${result.stdout.trimEnd()}\n`);
   }
-  if (result.stderr.trim()) {
+  if (!quiet && result.stderr.trim()) {
     process.stderr.write(`${result.stderr.trimEnd()}\n`);
   }
   if (result.cancelled) {

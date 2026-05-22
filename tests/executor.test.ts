@@ -302,6 +302,80 @@ test("executor runs global scripts once without project selection", async () => 
   assert.match(results[0]?.output ?? "", /global-run/);
 });
 
+test("executor runs selection-scoped scripts once with the full project selection", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-executor-selection-"));
+  fs.writeFileSync(
+    path.join(root, "script.ts"),
+    [
+      "export function selectionTask(context) {",
+      "  process.stdout.write(JSON.stringify({",
+      "    projectCount: context.selectedProjects?.length ?? 0,",
+      "    names: (context.selectedProjects ?? []).map((project) => project.name)",
+      "  }) + '\\n');",
+      "  return { success: true, message: 'ok' };",
+      "}",
+    ].join("\n"),
+    "utf8",
+  );
+  const config: AppConfig = {
+    configPath: path.join(root, "devtools.toml"),
+    discovery: {
+      roots: [root],
+      includePatterns: [],
+      excludePatterns: [],
+      projectTypes: ["python"],
+      cacheFile: path.join(root, ".cache.json"),
+    },
+    scripts: {
+      directory: path.join(root, "scripts"),
+    },
+    tui: {
+      confirmRun: true,
+      favoritesFile: path.join(root, ".favorites.json"),
+      scriptStateFile: path.join(root, ".script-state.json"),
+      scheduledJobsFile: path.join(root, ".scheduled-jobs.json"),
+      projectRows: 10,
+      summaryRows: 6,
+      projectSort: "alphabetical",
+    },
+  };
+  const script: ScriptDefinition = {
+    scriptId: "selection_task",
+    name: "Selection Task",
+    description: "",
+    projectTypes: ["python"],
+    scope: "selection",
+    entry: "selectionTask",
+    directory: root,
+    manifestPath: path.join(root, "manifest.toml"),
+    defaultArgs: {},
+  };
+  const projects: Project[] = [
+    {
+      name: "one",
+      path: path.join(root, "one"),
+      projectType: "python",
+      marker: "pyproject.toml",
+      projectTypes: ["python"],
+      identity: `one:${root}`,
+    },
+    {
+      name: "two",
+      path: path.join(root, "two"),
+      projectType: "python",
+      marker: "pyproject.toml",
+      projectTypes: ["python"],
+      identity: `two:${root}`,
+    },
+  ];
+
+  const results = await runScriptForProjects(config, script, projects);
+  assert.equal(results.length, 1);
+  const payload = JSON.parse((results[0]?.output ?? "").trim()) as { projectCount: number; names: string[] };
+  assert.equal(payload.projectCount, 2);
+  assert.deepEqual(payload.names, ["one", "two"]);
+});
+
 test("executor forwards shared batch metadata across project runs", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-executor-batch-"));
   fs.writeFileSync(

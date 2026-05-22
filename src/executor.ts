@@ -26,6 +26,19 @@ export async function runScriptForProjects(
     eventCallback?.(`[${prefix}] global :: ${detail}`);
     return [result];
   }
+  if (script.scope === "selection") {
+    eventCallback?.(`[start] ${script.scriptId} -> selection(${projects.length})`);
+    const result = await runScriptForProject(config, script, undefined, cliArgs, eventCallback, signal, outputMode, {
+      batchRunId,
+      batchProjectIndex: 0,
+      batchProjectCount: projects.length,
+      selectedProjects: projects,
+    });
+    const prefix = result.success ? "ok" : "fail";
+    const detail = result.message || result.error;
+    eventCallback?.(`[${prefix}] selection :: ${detail}`);
+    return [result];
+  }
 
   const results: ExecutionResult[] = [];
   for (const [projectIndex, project] of projects.entries()) {
@@ -89,6 +102,7 @@ export async function runScriptForProject(
     batchRunId: string;
     batchProjectIndex: number;
     batchProjectCount: number;
+    selectedProjects?: Project[];
   },
 ): Promise<ExecutionResult> {
   const args = { ...script.defaultArgs, ...cliArgs };
@@ -96,6 +110,7 @@ export async function runScriptForProject(
     configPath: config.configPath,
     script,
     project,
+    selectedProjects: batchMetadata?.selectedProjects ?? (project ? [project] : undefined),
     args,
     runId: randomUUID().replaceAll("-", ""),
     batchRunId: batchMetadata?.batchRunId,

@@ -103,7 +103,7 @@ function loadManifest(directory: string, manifestPath: string): ScriptDefinition
     name: String(raw.name),
     description: String(raw.description),
     projectTypes: [...(raw.project_types ?? [])],
-    scope: raw.scope === "global" ? "global" : "project",
+    scope: raw.scope === "global" ? "global" : raw.scope === "selection" ? "selection" : "project",
     entry: String(raw.entry),
     directory,
     manifestPath,

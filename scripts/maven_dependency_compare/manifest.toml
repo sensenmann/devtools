@@ -1,0 +1,7 @@
+id = "maven_dependency_compare"
+name = "☕  Maven dependency compare"
+description = "Compare parent POMs and dependency versions across the selected Maven projects in an interactive browser report."
+project_types = ["maven"]
+scope = "selection"
+entry = "mavenDependencyCompare"
+group = "Dependency Alignment"

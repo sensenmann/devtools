@@ -74,7 +74,7 @@ export interface ScriptGroupDefinition {
 }
 
 export type ScriptEntry = ScriptDefinition | ScriptGroupDefinition;
-export type ScriptScope = "project" | "global";
+export type ScriptScope = "project" | "global" | "selection";
 
 export interface ScriptVariantDefinition {
   argKey: string;
@@ -87,6 +87,7 @@ export interface ScriptContext {
   configPath: string;
   script: ScriptDefinition;
   project?: Project;
+  selectedProjects?: Project[];
   args: Record<string, unknown>;
   runId: string;
   batchRunId?: string;
