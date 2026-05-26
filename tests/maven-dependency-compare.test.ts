@@ -5,12 +5,34 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
-import { buildCompareReport, selectEffectiveProjectRoot } from "../scripts/maven_dependency_compare/lib/pom.ts";
+import { buildCompareReport, discoverModulePomPaths, findChildVersionPropertyWarnings, selectEffectiveProjectRoot } from "../scripts/maven_dependency_compare/lib/pom.ts";
 import { loadCompareConfig } from "../scripts/maven_dependency_compare/config.ts";
 import { parseXmlDocument, serializeXmlDocument } from "../scripts/maven_dependency_compare/lib/xml.ts";
 import { compareVersions } from "../scripts/maven_dependency_compare/lib/version.ts";
 import { renderReportPage } from "../scripts/maven_dependency_compare/lib/report-html.ts";
 import { startCompareServer } from "../scripts/maven_dependency_compare/server.ts";
+
+function makeAnalysis(
+  name: string,
+  projectPath: string,
+  rows: Array<[string, Record<string, unknown>]>,
+  modulePaths: string[] = ["."],
+) {
+  return {
+    project: {
+      name,
+      path: projectPath,
+      projectType: "maven" as const,
+      marker: "pom.xml",
+      projectTypes: ["maven"] as ("maven")[],
+      identity: `${name}:${projectPath}`,
+    },
+    pomPath: path.join(projectPath, "pom.xml"),
+    modulePaths: new Set(modulePaths),
+    pomPathsByModulePath: new Map(modulePaths.map((modulePath) => [modulePath, modulePath === "." ? path.join(projectPath, "pom.xml") : path.join(projectPath, modulePath, "pom.xml")])),
+    rows: new Map(rows),
+  };
+}
 
 test("maven dependency compare serializes simple XML mutations", () => {
   const document = parseXmlDocument(`
@@ -34,6 +56,60 @@ test("maven dependency compare config defaults repo urls and override patterns",
     pattern: "at.gv.brz.*",
     baseUrl: "https://mvnrepository.com/artifact/",
   }]);
+});
+
+test("maven dependency compare discovers child pom.xml files recursively from modules", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-compare-modules-"));
+  fs.mkdirSync(path.join(root, "service", "api"), { recursive: true });
+  fs.writeFileSync(path.join(root, "pom.xml"), `
+    <project>
+      <modules>
+        <module>service</module>
+      </modules>
+    </project>
+  `, "utf8");
+  fs.writeFileSync(path.join(root, "service", "pom.xml"), `
+    <project>
+      <modules>
+        <module>api</module>
+      </modules>
+    </project>
+  `, "utf8");
+  fs.writeFileSync(path.join(root, "service", "api", "pom.xml"), "<project />", "utf8");
+
+  assert.deepEqual(discoverModulePomPaths(path.join(root, "pom.xml")).map((entry) => path.relative(root, entry)), [
+    "pom.xml",
+    path.join("service", "pom.xml"),
+    path.join("service", "api", "pom.xml"),
+  ]);
+});
+
+test("maven dependency compare warns about *.version properties in child poms", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devtools-compare-child-props-"));
+  fs.mkdirSync(path.join(root, "service"), { recursive: true });
+  fs.writeFileSync(path.join(root, "pom.xml"), `
+    <project>
+      <properties>
+        <root.version>1.0.0</root.version>
+      </properties>
+      <modules>
+        <module>service</module>
+      </modules>
+    </project>
+  `, "utf8");
+  fs.writeFileSync(path.join(root, "service", "pom.xml"), `
+    <project>
+      <properties>
+        <child.version>2.0.0</child.version>
+        <service.api.version>3.0.0</service.api.version>
+      </properties>
+    </project>
+  `, "utf8");
+
+  const warnings = findChildVersionPropertyWarnings([{ name: "demo", path: root }]);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]?.modulePath, "service");
+  assert.deepEqual(warnings[0]?.propertyNames, ["child.version", "service.api.version"]);
 });
 
 test("maven dependency compare version ordering prefers higher patch versions", () => {
@@ -342,23 +418,16 @@ test("maven dependency compare sorts override rows before managed and direct row
 
 test("maven dependency compare marks missing override properties as warnings in other projects", () => {
   const report = buildCompareReport([
-    {
-      project: {
-        name: "alpha",
-        path: "/tmp/alpha",
-        projectType: "maven",
-        marker: "pom.xml",
-        projectTypes: ["maven"],
-        identity: "alpha:/tmp/alpha",
-      },
-      pomPath: "/tmp/alpha/pom.xml",
-      rows: new Map([
-        ["override:tomcat.version", {
-          rowId: "override:tomcat.version",
+    makeAnalysis("alpha", "/tmp/alpha", [
+      ["override:.:__override__:tomcat.version", {
+          rowId: "override:.:__override__:tomcat.version",
           kind: "override",
           groupId: "__override__",
           artifactId: "tomcat.version",
           dependencyLabel: "$tomcat.version",
+          modulePath: ".",
+          moduleName: "alpha",
+          pomPath: "/tmp/alpha/pom.xml",
           rawVersion: "11.0.21",
           effectiveVersion: "11.0.21",
           propertyName: "tomcat.version",
@@ -366,32 +435,63 @@ test("maven dependency compare marks missing override properties as warnings in 
           providerVersion: "10.1.54",
           hasLocalPropertyOverride: true,
           overrideTargets: [{
-            rowId: "managed:org.apache.tomcat.embed:tomcat-embed-core",
+            rowId: "managed:.:org.apache.tomcat.embed:tomcat-embed-core",
             kind: "managed",
             groupId: "org.apache.tomcat.embed",
             artifactId: "tomcat-embed-core",
             dependencyLabel: "org.apache.tomcat.embed:tomcat-embed-core",
+            modulePath: ".",
+            pomPath: "/tmp/alpha/pom.xml",
             providerVersion: "10.1.54",
           }],
         }],
       ]),
-    },
-    {
-      project: {
-        name: "beta",
-        path: "/tmp/beta",
-        projectType: "maven",
-        marker: "pom.xml",
-        projectTypes: ["maven"],
-        identity: "beta:/tmp/beta",
-      },
-      pomPath: "/tmp/beta/pom.xml",
-      rows: new Map(),
-    },
+    makeAnalysis("beta", "/tmp/beta", [], ["."]),
   ]);
   const row = report.rows[0]!;
   assert.equal(row.cells[1]?.present, false);
   assert.equal(row.cells[1]?.isMissingOverrideWarning, true);
+});
+
+test("maven dependency compare keeps child module rows separate and does not warn when the module is absent", () => {
+  const report = buildCompareReport([
+    makeAnalysis("alpha", "/tmp/alpha", [
+      ["direct:service:org.example:demo", {
+        rowId: "direct:service:org.example:demo",
+        kind: "direct",
+        groupId: "org.example",
+        artifactId: "demo",
+        dependencyLabel: "org.example:demo",
+        modulePath: "service",
+        moduleName: "service",
+        pomPath: "/tmp/alpha/service/pom.xml",
+        rawVersion: "1.0.0",
+        effectiveVersion: "1.0.0",
+        hasLocalPropertyOverride: false,
+      }],
+      ["override:service:__override__:demo.version", {
+        rowId: "override:service:__override__:demo.version",
+        kind: "override",
+        groupId: "__override__",
+        artifactId: "demo.version",
+        dependencyLabel: "$demo.version",
+        modulePath: "service",
+        moduleName: "service",
+        pomPath: "/tmp/alpha/service/pom.xml",
+        rawVersion: "1.0.0",
+        effectiveVersion: "1.0.0",
+        propertyName: "demo.version",
+        propertyValue: "1.0.0",
+        hasLocalPropertyOverride: true,
+        overrideTargets: [],
+      }],
+    ], [".", "service"]),
+    makeAnalysis("beta", "/tmp/beta", [], ["."]),
+  ]);
+  assert.equal(report.rows.find((row) => row.rowId === "direct:service:org.example:demo")?.label, "service :: org.example:demo");
+  const overrideRow = report.rows.find((row) => row.rowId === "override:service:__override__:demo.version")!;
+  assert.equal(overrideRow.label, "service :: $demo.version");
+  assert.equal(overrideRow.cells[1]?.isMissingOverrideWarning, false);
 });
 
 test("maven dependency compare keeps unused version properties as removable override rows", () => {
@@ -455,6 +555,9 @@ test("maven dependency compare report page contains interactive hooks", () => {
   assert.match(html, /Maven Dependency Compare/);
   assert.match(html, /\/api\/report/);
   assert.match(html, /Show only differences/);
+  assert.match(html, /id="showOnlyDifferences" checked/);
+  assert.match(html, /Hide missing properties/);
+  assert.match(html, /id="hideMissingProperties" checked/);
   assert.match(html, /Hide Version Updates/);
   assert.match(html, /hideVersionUpdatesControl/);
   assert.match(html, /bootstrap@5\.3\.3/);

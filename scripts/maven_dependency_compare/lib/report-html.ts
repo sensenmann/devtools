@@ -56,8 +56,12 @@ export function renderReportPage(): string {
         </div>
         <div class="d-flex flex-column align-items-start gap-2">
           <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="showOnlyDifferences" />
+            <input class="form-check-input" type="checkbox" id="showOnlyDifferences" checked />
             <label class="form-check-label" for="showOnlyDifferences">Show only differences</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="hideMissingProperties" checked />
+            <label class="form-check-label" for="hideMissingProperties">Hide missing properties</label>
           </div>
           <div class="form-check" id="hideVersionUpdatesControl">
             <input class="form-check-input" type="checkbox" id="hideVersionUpdates" />
@@ -168,14 +172,18 @@ export function renderReportPage(): string {
         document.getElementById('hideVersionUpdatesControl').classList.toggle('d-none', report.enableDependencyUpdates === false);
         const app = document.getElementById('app');
         const onlyDifferences = document.getElementById('showOnlyDifferences').checked;
+        const hideMissingProperties = document.getElementById('hideMissingProperties').checked;
         const hideVersionUpdates = document.getElementById('hideVersionUpdates').checked;
         const visibleReport = deriveVisibleReport(report, hiddenProjects);
         const head = visibleReport.projects.map((project) => (
           '<th><div class="project-head"><span>' + escapeHtml(project.name) + '</span><button class="remove-project-btn" title="Spalte entfernen" onclick="hideProject(' + escapeAttributeJson(project.path) + ')">×</button></div></th>'
         )).join('');
-        const visibleRows = onlyDifferences
-          ? visibleReport.rows.filter((row) => row.cells.some((cell) => cell.isOutdated || cell.isPinnedBelowProvider || cell.isMissingOverrideWarning || cell.isUnusedOverride))
+        const filteredRows = hideMissingProperties
+          ? visibleReport.rows.filter((row) => !row.cells.some((cell) => cell.isMissingOverrideWarning))
           : visibleReport.rows;
+        const visibleRows = onlyDifferences
+          ? filteredRows.filter((row) => row.cells.some((cell) => cell.isOutdated || cell.isPinnedBelowProvider || cell.isMissingOverrideWarning || cell.isUnusedOverride))
+          : filteredRows;
         const rows = visibleRows.map(renderRow).join('');
         app.innerHTML = '<div class="table-responsive shadow-sm bg-white rounded border"><table class="table table-sm table-hover mb-0"><thead><tr><th class="dep-col">Dependency</th><th class="kind-col">Kind</th>' + head + '<th class="action-col">Actions</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
       }
@@ -503,6 +511,7 @@ export function renderReportPage(): string {
       }
 
       document.getElementById('showOnlyDifferences').addEventListener('change', () => render());
+      document.getElementById('hideMissingProperties').addEventListener('change', () => render());
       document.getElementById('hideVersionUpdates').addEventListener('change', () => render());
       document.getElementById('statusModalReload').addEventListener('click', () => {
         void reloadAllProjects();
